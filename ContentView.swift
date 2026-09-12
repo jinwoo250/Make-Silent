@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Photos
+import PhotosUI
 import CoreLocation
 import ImageIO
 import UniformTypeIdentifiers
@@ -9,6 +10,7 @@ import UIKit
 import CoreMotion
 import CallKit
 import MediaPlayer
+import AVKit
 
 // MARK: - App Main
 @main
@@ -309,6 +311,7 @@ struct CameraMainView: View {
                                             }
                                         }
                                         .frame(width: 64, height: 54)
+                                        .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
                                     .glassEffect(.regular.interactive(), in: .capsule)
@@ -319,6 +322,7 @@ struct CameraMainView: View {
                                     Image(systemName: "arrow.triangle.2.circlepath")
                                         .font(.title2.weight(.medium))
                                         .frame(width: 64, height: 54)
+                                        .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .glassEffect(.regular.interactive(), in: .capsule)
@@ -342,6 +346,7 @@ struct CameraMainView: View {
                                         .stroke(Color.white.opacity(0.8), lineWidth: 2)
                                         .frame(width: 72, height: 72)
                                 }
+                                .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                             
@@ -353,18 +358,30 @@ struct CameraMainView: View {
                                         .font(.title2.weight(.bold))
                                         .foregroundColor(camera.isRecording ? .red : nil)
                                         .frame(width: 64, height: 54)
+                                        .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .glassEffect(.regular.interactive(), in: .capsule)
                                 
                                 Menu {
-                                    Button("원본") { camera.filterIndex = 0 }
-                                    Button("흑백") { camera.filterIndex = 1 }
-                                    Button("세피아") { camera.filterIndex = 2 }
+                                    Button(action: { camera.filterIndex = 0 }) {
+                                        Text("원본")
+                                        if camera.filterIndex == 0 { Image(systemName: "checkmark") }
+                                    }
+                                    Button(action: { camera.filterIndex = 1 }) {
+                                        Text("흑백")
+                                        if camera.filterIndex == 1 { Image(systemName: "checkmark") }
+                                    }
+                                    Button(action: { camera.filterIndex = 2 }) {
+                                        Text("세피아")
+                                        if camera.filterIndex == 2 { Image(systemName: "checkmark") }
+                                    }
                                 } label: {
                                     Image(systemName: "camera.filters")
                                         .font(.title2.weight(.medium))
+                                        .foregroundColor(.white)
                                         .frame(width: 64, height: 54)
+                                        .contentShape(Rectangle())
                                 }
                                 .glassEffect(.regular.interactive(), in: .capsule)
                             }
@@ -444,11 +461,24 @@ struct CameraMainView: View {
                 .preferredColorScheme(.dark)
         }
         .fullScreenCover(isPresented: $camera.showPhotoPreviewSheet) {
-            if let photo = camera.latestPhoto {
-                PhotoPreviewSheet(image: photo, camera: camera)
-            }
+            PhotoPreviewSheet(camera: camera)
         }
     }
+}
+
+// MARK: - Capture Item
+struct CaptureItem: Identifiable {
+    let id = UUID()
+    let url: URL
+    let isVideo: Bool
+    var thumbnail: UIImage?
+    var localIdentifier: String?
+}
+
+// MARK: - Share Item
+struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 // MARK: - Camera Manager
@@ -464,6 +494,13 @@ class CameraManager: NSObject, ObservableObject {
         didSet {
             guard oldValue != qualityIndex else { return }
             UserDefaults.standard.set(qualityIndex, forKey: "qualityIndex")
+            updateSessionPresetAsync()
+        }
+    }
+    @Published var fpsIndex: Int = UserDefaults.standard.object(forKey: "fpsIndex") as? Int ?? 0 {
+        didSet {
+            guard oldValue != fpsIndex else { return }
+            UserDefaults.standard.set(fpsIndex, forKey: "fpsIndex")
             updateSessionPresetAsync()
         }
     }
@@ -512,6 +549,8 @@ class CameraManager: NSObject, ObservableObject {
     
     @Published var filterIndex: Int = 0
     @Published var latestPhoto: UIImage? = nil
+    @Published var capturedItems: [CaptureItem] = []
+    var assetIdentifiers: [URL: String] = [:]
     
     @Published var showBlackoutAlert = false
     @Published var isBlackoutMode = false {
@@ -589,8 +628,15 @@ class CameraManager: NSObject, ObservableObject {
     
     private let sessionQueue = DispatchQueue(label: "cameraSessionQueue")
     
+    private let ciContext = CIContext()
+    private var cachedScreenRatio: CGFloat = 19.5 / 9.0
+    private var isAppActive: Bool = true
+    
     override init() {
         super.init()
+        
+        clearTempFolder()
+        
         previewLayer.session = captureSession
         
         callObserver.setDelegate(self, queue: .main)
@@ -607,17 +653,32 @@ class CameraManager: NSObject, ObservableObject {
         volumeObserver = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] session, change in
             guard let self = self, let newVolume = change.newValue else { return }
             DispatchQueue.main.async {
+                guard self.isAppActive else {
+                    self.lastVolume = newVolume
+                    return
+                }
+                
                 let isUp = newVolume > self.lastVolume
                 let isDown = newVolume < self.lastVolume
                 
                 if isUp || isDown {
                     self.handleVolumeButtonPress(isUp: isUp)
-                } else {
+                } else if newVolume == 1.0 || newVolume == 0.0 {
                     self.handleVolumeButtonPress(isUp: true)
                 }
                 
                 self.lastVolume = newVolume
             }
+        }
+        
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        
+        DispatchQueue.main.async {
+            let bounds = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first?.screen.bounds ?? CGRect(x: 0, y: 0, width: 393, height: 852)
+            self.cachedScreenRatio = max(bounds.width, bounds.height) / min(bounds.width, bounds.height)
         }
     }
     
@@ -627,6 +688,30 @@ class CameraManager: NSObject, ObservableObject {
         motionManager.stopAccelerometerUpdates()
         messageTimer?.invalidate()
         focusTimer?.invalidate()
+    }
+    
+    @objc private func appDidEnterBackground() {
+        isAppActive = false
+    }
+    
+    @objc private func appWillEnterForeground() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self else { return }
+            self.isAppActive = true
+            self.lastVolume = AVAudioSession.sharedInstance().outputVolume
+        }
+    }
+    
+    private func clearTempFolder() {
+        DispatchQueue.global(qos: .background).async {
+            let tempPath = NSTemporaryDirectory()
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: tempPath) {
+                for file in contents where file.hasPrefix("Captured_") || file.hasPrefix("video_") {
+                    let filePath = URL(fileURLWithPath: tempPath).appendingPathComponent(file)
+                    try? FileManager.default.removeItem(at: filePath)
+                }
+            }
+        }
     }
     
     private func getBestBackCamera() -> AVCaptureDevice? {
@@ -676,7 +761,7 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func handleVolumeButtonPress(isUp: Bool) {
-        guard Date().timeIntervalSince(lastVolumePressTime) > 0.1 else { return }
+        guard Date().timeIntervalSince(lastVolumePressTime) > 0.4 else { return }
         lastVolumePressTime = Date()
         
         if volumeButtonAction == 0 {
@@ -745,7 +830,7 @@ class CameraManager: NSObject, ObservableObject {
     func requestPermissionsForOnboarding(completion: @escaping (Bool) -> Void) {
         AVCaptureDevice.requestAccess(for: .video) { videoGranted in
             AVCaptureDevice.requestAccess(for: .audio) { _ in
-                PHPhotoLibrary.requestAuthorization { status in
+                let handler: (PHAuthorizationStatus) -> Void = { status in
                     DispatchQueue.main.async {
                         if videoGranted {
                             self.setupCamera()
@@ -753,6 +838,12 @@ class CameraManager: NSObject, ObservableObject {
                         }
                         completion(videoGranted && (status == .authorized || status == .limited))
                     }
+                }
+                
+                if #available(iOS 14, *) {
+                    PHPhotoLibrary.requestAuthorization(for: .readWrite, handler: handler)
+                } else {
+                    PHPhotoLibrary.requestAuthorization(handler)
                 }
             }
         }
@@ -824,6 +915,7 @@ class CameraManager: NSObject, ObservableObject {
         let currentQuality = self.qualityIndex
         let isAuto = self.isAutoFocusOn
         let expIndex = self.exposureIndex
+        let currentFpsIndex = self.fpsIndex
         
         var currentDeviceOrientation = motionManager.isAccelerometerAvailable ? trueDeviceOrientation : UIDevice.current.orientation
         if currentDeviceOrientation == .faceUp || currentDeviceOrientation == .faceDown || currentDeviceOrientation == .unknown {
@@ -855,11 +947,14 @@ class CameraManager: NSObject, ObservableObject {
             self.videoDeviceInput = videoInput
             if self.captureSession.canAddInput(videoInput) { self.captureSession.addInput(videoInput) }
             
-            self.applyQualityPreset(ratioIndex: currentRatio, qualityIndex: currentQuality)
+            self.applyQualityAndFrameRate(ratioIndex: currentRatio, qualityIndex: currentQuality, fpsIndex: currentFpsIndex)
             self.internalUpdateAutoFocus(isAuto: isAuto)
             self.internalApplyExposureBias(index: expIndex)
             
-            if let audioDevice = AVCaptureDevice.default(for: .audio),
+            let hasAudio = self.captureSession.inputs.contains { input in
+                return input.ports.contains { $0.mediaType == .audio }
+            }
+            if !hasAudio, let audioDevice = AVCaptureDevice.default(for: .audio),
                let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
                self.captureSession.canAddInput(audioInput) {
                 self.captureSession.addInput(audioInput)
@@ -879,6 +974,114 @@ class CameraManager: NSObject, ObservableObject {
             self.updateCameraZoomFactors(camera: backCamera)
             
             self.captureSession.startRunning()
+        }
+    }
+    
+    private func applyQualityAndFrameRate(ratioIndex: Int, qualityIndex: Int, fpsIndex: Int) {
+        guard let device = videoDeviceInput?.device else { return }
+        let targetFPS: Double = fpsIndex == 1 ? 60.0 : 30.0
+        let isHighQuality = (qualityIndex == 1)
+        let want4by3 = (ratioIndex != 0)
+        
+        var bestFormat: AVCaptureDevice.Format?
+        var maxRes = 0
+        
+        for format in device.formats {
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let width = Int(dimensions.width)
+            let height = Int(dimensions.height)
+            let ratio = Double(max(width, height)) / Double(min(width, height))
+            
+            let is16by9 = abs(ratio - (16.0 / 9.0)) < 0.1
+            let is4by3 = abs(ratio - (4.0 / 3.0)) < 0.1
+            
+            if want4by3 && !is4by3 { continue }
+            if !want4by3 && !is16by9 { continue }
+            
+            let supportsFPS = format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= targetFPS }
+            if !supportsFPS { continue }
+            
+            let resolution = width * height
+            
+            if isHighQuality {
+                if resolution > maxRes {
+                    maxRes = resolution
+                    bestFormat = format
+                }
+            } else {
+                if max(width, height) == 1920 {
+                    bestFormat = format
+                    break
+                } else if bestFormat == nil {
+                    bestFormat = format
+                }
+            }
+        }
+        
+        if bestFormat == nil {
+            for format in device.formats {
+                let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                let width = Int(dimensions.width)
+                let height = Int(dimensions.height)
+                
+                let supportsFPS = format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= targetFPS }
+                if !supportsFPS { continue }
+                
+                let resolution = width * height
+                
+                if isHighQuality {
+                    if resolution > maxRes {
+                        maxRes = resolution
+                        bestFormat = format
+                    }
+                } else {
+                    if max(width, height) == 1920 {
+                        bestFormat = format
+                        break
+                    } else if bestFormat == nil {
+                        bestFormat = format
+                    }
+                }
+            }
+        }
+        
+        if bestFormat != nil {
+            if captureSession.canSetSessionPreset(.inputPriority) {
+                captureSession.sessionPreset = .inputPriority
+            }
+        } else {
+            if isHighQuality {
+                if want4by3 && captureSession.canSetSessionPreset(.photo) {
+                    captureSession.sessionPreset = .photo
+                } else if captureSession.canSetSessionPreset(.hd4K3840x2160) {
+                    captureSession.sessionPreset = .hd4K3840x2160
+                } else if captureSession.canSetSessionPreset(.hd1920x1080) {
+                    captureSession.sessionPreset = .hd1920x1080
+                }
+            } else {
+                if captureSession.canSetSessionPreset(.hd1920x1080) {
+                    captureSession.sessionPreset = .hd1920x1080
+                }
+            }
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            
+            if let format = bestFormat {
+                device.activeFormat = format
+            }
+            
+            let activeFormat = device.activeFormat
+            if let range = activeFormat.videoSupportedFrameRateRanges.first(where: { $0.maxFrameRate >= targetFPS }) ?? activeFormat.videoSupportedFrameRateRanges.last {
+                let fps = min(targetFPS, range.maxFrameRate)
+                device.activeVideoMinFrameDuration = CMTimeMake(value: 1, timescale: Int32(fps))
+                device.activeVideoMaxFrameDuration = CMTimeMake(value: 1, timescale: Int32(fps))
+            }
+            
+            device.unlockForConfiguration()
+        } catch {
+            print("Failed to set format: \(error)")
         }
     }
     
@@ -933,8 +1136,11 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func updateSessionPresetAsync() {
+        guard !isRecording else { return }
+        
         let currentRatioIndex = frameRatioIndex
         let currentQualityIndex = qualityIndex
+        let currentFpsIndex = fpsIndex
         DispatchQueue.main.async { self.isChangingQuality = true }
         
         var currentDeviceOrientation = motionManager.isAccelerometerAvailable ? trueDeviceOrientation : UIDevice.current.orientation
@@ -950,28 +1156,18 @@ class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             self.captureSession.beginConfiguration()
-            self.applyQualityPreset(ratioIndex: currentRatioIndex, qualityIndex: currentQualityIndex)
+            
+            self.applyQualityAndFrameRate(ratioIndex: currentRatioIndex, qualityIndex: currentQualityIndex, fpsIndex: currentFpsIndex)
             self.applyOrientationConfiguration(uiOrientation: uiOrientation, captureDeviceOrientation: captureDeviceOrientation)
+            
             self.captureSession.commitConfiguration()
+            
+            if let device = self.videoDeviceInput?.device {
+                self.updateCameraZoomFactors(camera: device)
+            }
             
             DispatchQueue.main.async {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.isChangingQuality = false }
-            }
-        }
-    }
-    
-    private func applyQualityPreset(ratioIndex: Int, qualityIndex: Int) {
-        if ratioIndex == 0 {
-            if qualityIndex == 1 && captureSession.canSetSessionPreset(.hd4K3840x2160) {
-                captureSession.sessionPreset = .hd4K3840x2160
-            } else {
-                captureSession.sessionPreset = .hd1920x1080
-            }
-        } else {
-            if captureSession.canSetSessionPreset(.photo) {
-                captureSession.sessionPreset = .photo
-            } else {
-                captureSession.sessionPreset = .hd1920x1080
             }
         }
     }
@@ -1129,9 +1325,33 @@ class CameraManager: NSObject, ObservableObject {
                     self.showFloatingAlert("✅ 비디오가 저장되었습니다")
                 }
             } else {
-                do { try AVAudioSession.sharedInstance().setActive(true) } catch {}
+                do {
+                    try AVAudioSession.sharedInstance().setActive(true, options: [])
+                } catch {
+                    print("Failed to set active audio session: \(error)")
+                }
+                
                 let tempDirectory = NSTemporaryDirectory()
                 let filePath = tempDirectory + "video_\(UUID().uuidString).mp4"
+                
+                if let location = self.currentLocation {
+                    let item = AVMutableMetadataItem()
+                    item.keySpace = .quickTimeMetadata
+                    item.key = AVMetadataKey.quickTimeMetadataKeyLocationISO6709 as NSString
+                    item.identifier = .quickTimeMetadataLocationISO6709
+                    
+                    let lat = location.coordinate.latitude
+                    let lon = location.coordinate.longitude
+                    let alt = location.altitude
+                    
+                    item.value = String(format: "%+08.4f%+09.4f%+08.3f/", lat, lon, alt) as NSString
+                    item.dataType = "com.apple.metadata.datatype.UTF-8"
+                    
+                    self.movieFileOutput.metadata = [item]
+                } else {
+                    self.movieFileOutput.metadata = []
+                }
+                
                 self.movieFileOutput.startRecording(to: URL(fileURLWithPath: filePath), recordingDelegate: self)
                 DispatchQueue.main.async {
                     self.showFloatingAlert("🔴 비디오 녹화 시작")
@@ -1161,8 +1381,11 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func switchCamera() {
+        guard !isRecording else { return }
+        
         let isAuto = self.isAutoFocusOn
         let expIndex = self.exposureIndex
+        let currentFpsIndex = self.fpsIndex
         
         var currentDeviceOrientation = motionManager.isAccelerometerAvailable ? trueDeviceOrientation : UIDevice.current.orientation
         if currentDeviceOrientation == .faceUp || currentDeviceOrientation == .faceDown || currentDeviceOrientation == .unknown {
@@ -1201,6 +1424,8 @@ class CameraManager: NSObject, ObservableObject {
             if let connection = self.videoDataOutput.connection(with: .video) {
                 connection.isVideoMirrored = !self.isBackCamera
             }
+            
+            self.applyQualityAndFrameRate(ratioIndex: self.frameRatioIndex, qualityIndex: self.qualityIndex, fpsIndex: currentFpsIndex)
             
             self.internalUpdateAutoFocus(isAuto: isAuto)
             self.internalApplyExposureBias(index: expIndex)
@@ -1323,6 +1548,19 @@ class CameraManager: NSObject, ObservableObject {
             } catch {}
         }
     }
+    
+    private func generateThumbnail(for url: URL, completion: @escaping (UIImage?) -> Void) {
+        let asset = AVURLAsset(url: url)
+        let imageGenerator = AVAssetImageGenerator(asset: asset)
+        imageGenerator.appliesPreferredTrackTransform = true
+        imageGenerator.generateCGImageAsynchronously(for: .zero) { cgImage, _, _ in
+            if let cgImage = cgImage {
+                completion(UIImage(cgImage: cgImage))
+            } else {
+                completion(nil)
+            }
+        }
+    }
 }
 
 extension CameraManager: CXCallObserverDelegate {
@@ -1383,14 +1621,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         
         var targetRatio: CGFloat = 1.0
         if frameRatioIndex == 0 {
-            let screenBounds = DispatchQueue.main.sync {
-                UIApplication.shared.connectedScenes
-                    .compactMap { $0 as? UIWindowScene }
-                    .first?.screen.bounds ?? CGRect(x: 0, y: 0, width: 393, height: 852)
-            }
-            let screenMax = max(screenBounds.width, screenBounds.height)
-            let screenMin = min(screenBounds.width, screenBounds.height)
-            targetRatio = screenMax / screenMin
+            targetRatio = cachedScreenRatio
         } else if frameRatioIndex == 1 {
             targetRatio = 4.0 / 3.0
         } else {
@@ -1419,10 +1650,10 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
                 cropRect = CGRect(x: ciImage.extent.origin.x, y: y, width: width, height: newHeight)
             }
         }
-        ciImage = ciImage.cropped(to: cropRect)
         
-        let context = CIContext()
-        guard let baseCGImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
+        ciImage = ciImage.cropped(to: cropRect.integral)
+        
+        guard let baseCGImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
         
         let uiImage = UIImage(cgImage: baseCGImage, scale: 1.0, orientation: .up)
         var finalCGImage = baseCGImage
@@ -1431,52 +1662,51 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1.0
             
-            var stampedUIImage: UIImage?
-            DispatchQueue.main.sync {
-                let renderer = UIGraphicsImageRenderer(size: uiImage.size, format: format)
-                stampedUIImage = renderer.image { ctx in
-                    uiImage.draw(at: .zero)
-                    
-                    let dateFormatter = DateFormatter()
-                    dateFormatter.dateFormat = "yyyy.MM.dd HH:mm:ss"
-                    let dateStr = dateFormatter.string(from: Date())
-                    
-                    let fontSize = max(uiImage.size.width, uiImage.size.height) * 0.025
-                    let font = UIFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .bold)
-                    
-                    let shadow = NSShadow()
-                    shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
-                    shadow.shadowBlurRadius = 4
-                    shadow.shadowOffset = CGSize(width: 2, height: 2)
-                    
-                    let attrs: [NSAttributedString.Key: Any] = [
-                        .font: font,
-                        .foregroundColor: UIColor.systemOrange,
-                        .shadow: shadow
-                    ]
-                    
-                    let textSize = dateStr.size(withAttributes: attrs)
-                    let margin = fontSize
-                    let rect = CGRect(x: uiImage.size.width - textSize.width - margin,
-                                      y: uiImage.size.height - textSize.height - margin,
-                                      width: textSize.width, height: textSize.height)
-                    
-                    dateStr.draw(in: rect, withAttributes: attrs)
-                }
+            let renderer = UIGraphicsImageRenderer(size: uiImage.size, format: format)
+            let stampedUIImage = renderer.image { ctx in
+                uiImage.draw(at: .zero)
+                
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy.MM.dd HH:mm:ss"
+                let dateStr = dateFormatter.string(from: Date())
+                
+                let fontSize = max(uiImage.size.width, uiImage.size.height) * 0.025
+                let font = UIFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .bold)
+                
+                let shadow = NSShadow()
+                shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
+                shadow.shadowBlurRadius = 4
+                shadow.shadowOffset = CGSize(width: 2, height: 2)
+                
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: UIColor.systemOrange,
+                    .shadow: shadow
+                ]
+                
+                let textSize = dateStr.size(withAttributes: attrs)
+                let margin = fontSize
+                let rect = CGRect(x: uiImage.size.width - textSize.width - margin,
+                                  y: uiImage.size.height - textSize.height - margin,
+                                  width: textSize.width, height: textSize.height)
+                
+                dateStr.draw(in: rect, withAttributes: attrs)
             }
             
-            if let stamped = stampedUIImage, let stampedCG = stamped.cgImage {
+            if let stampedCG = stampedUIImage.cgImage {
                 finalCGImage = stampedCG
-                DispatchQueue.main.async { self.latestPhoto = stamped }
-            } else {
-                DispatchQueue.main.async { self.latestPhoto = uiImage }
             }
-        } else {
-            DispatchQueue.main.async { self.latestPhoto = uiImage }
         }
         
         let mutableData = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(mutableData, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+        
+        var metadata = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault,
+                                                     target: sampleBuffer,
+                                                     attachmentMode: kCMAttachmentMode_ShouldPropagate) as? [CFString: Any] ?? [:]
+        
+        var exifDict = (metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        var tiffDict = (metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
         
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
@@ -1486,42 +1716,105 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         let lensModel = "\(UIDevice.current.model) \(device?.localizedName ?? "Camera")"
         let fNumber = device?.lensAperture ?? 1.8
         
-        var properties: [CFString: Any] = [
-            kCGImagePropertyOrientation: 1,
-            kCGImagePropertyExifDictionary: [
-                kCGImagePropertyExifDateTimeOriginal: currentDateString,
-                kCGImagePropertyExifDateTimeDigitized: currentDateString,
-                kCGImagePropertyExifLensModel: lensModel,
-                kCGImagePropertyExifFNumber: fNumber
-            ]
-        ]
+        tiffDict[kCGImagePropertyTIFFMake] = "Apple"
+        tiffDict[kCGImagePropertyTIFFModel] = UIDevice.current.model
         
-        if let location = currentLocation {
-            properties[kCGImagePropertyGPSDictionary] = [
+        exifDict[kCGImagePropertyExifDateTimeOriginal] = currentDateString
+        exifDict[kCGImagePropertyExifDateTimeDigitized] = currentDateString
+        exifDict[kCGImagePropertyExifLensModel] = lensModel
+        exifDict[kCGImagePropertyExifLensMake] = "Apple"
+        exifDict[kCGImagePropertyExifFNumber] = fNumber
+        
+        metadata[kCGImagePropertyOrientation] = 1
+        metadata[kCGImagePropertyTIFFDictionary] = tiffDict
+        metadata[kCGImagePropertyExifDictionary] = exifDict
+        
+        if let location = self.currentLocation {
+            let gpsTimeFormatter = DateFormatter()
+            gpsTimeFormatter.dateFormat = "HH:mm:ss"
+            gpsTimeFormatter.timeZone = TimeZone(abbreviation: "UTC")
+            
+            let gpsDateFormatter = DateFormatter()
+            gpsDateFormatter.dateFormat = "yyyy:MM:dd"
+            gpsDateFormatter.timeZone = TimeZone(abbreviation: "UTC")
+            
+            let altRef = location.altitude >= 0 ? 0 : 1
+            
+            metadata[kCGImagePropertyGPSDictionary] = [
                 kCGImagePropertyGPSLatitude: abs(location.coordinate.latitude),
                 kCGImagePropertyGPSLatitudeRef: location.coordinate.latitude >= 0 ? "N" : "S",
                 kCGImagePropertyGPSLongitude: abs(location.coordinate.longitude),
                 kCGImagePropertyGPSLongitudeRef: location.coordinate.longitude >= 0 ? "E" : "W",
-                kCGImagePropertyGPSAltitude: location.altitude,
-                kCGImagePropertyGPSTimeStamp: dateFormatter.string(from: location.timestamp)
+                kCGImagePropertyGPSAltitude: abs(location.altitude),
+                kCGImagePropertyGPSAltitudeRef: altRef,
+                kCGImagePropertyGPSTimeStamp: gpsTimeFormatter.string(from: location.timestamp),
+                kCGImagePropertyGPSDateStamp: gpsDateFormatter.string(from: location.timestamp)
             ]
         }
         
-        CGImageDestinationAddImage(destination, finalCGImage, properties as CFDictionary)
+        CGImageDestinationAddImage(destination, finalCGImage, metadata as CFDictionary)
         CGImageDestinationFinalize(destination)
         
-        if self.isShareOn && !self.isBlackoutMode {
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("shared_\(UUID().uuidString).jpg")
-            try? mutableData.write(to: tempURL)
-            DispatchQueue.main.async { self.shareURL = ShareItem(url: tempURL) }
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("Captured_\(UUID().uuidString).jpg")
+        try? mutableData.write(to: tempURL)
+        
+        let thumbnailImage = UIImage(contentsOfFile: tempURL.path) ?? uiImage
+        let captureItem = CaptureItem(url: tempURL, isVideo: false, thumbnail: thumbnailImage)
+        let targetUrl = tempURL
+        
+        DispatchQueue.main.async {
+            self.capturedItems.append(captureItem)
+            self.latestPhoto = captureItem.thumbnail
+            
+            if self.isShareOn && !self.isBlackoutMode {
+                self.shareURL = ShareItem(url: tempURL)
+            }
         }
         
-        PHPhotoLibrary.requestAuthorization { status in
+        let savedLocation = self.currentLocation
+        let savePhotoBlock = {
+            var placeholderLocalIdentifier: String?
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: mutableData as Data, options: nil)
+                if let location = savedLocation {
+                    request.location = location
+                }
+                placeholderLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
+            }) { [weak self] success, _ in
+                guard let self = self else { return }
+                if success, let localId = placeholderLocalIdentifier {
+                    DispatchQueue.main.async {
+                        self.assetIdentifiers[targetUrl] = localId
+                        if let index = self.capturedItems.firstIndex(where: { $0.url == targetUrl }) {
+                            self.capturedItems[index].localIdentifier = localId
+                        }
+                    }
+                }
+            }
+        }
+        
+        if #available(iOS 14, *) {
+            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
             if status == .authorized || status == .limited {
-                PHPhotoLibrary.shared().performChanges({
-                    let request = PHAssetCreationRequest.forAsset()
-                    request.addResource(with: .photo, data: mutableData as Data, options: nil)
-                })
+                savePhotoBlock()
+            } else if status == .notDetermined {
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
+                    if newStatus == .authorized || newStatus == .limited {
+                        savePhotoBlock()
+                    }
+                }
+            }
+        } else {
+            let status = PHPhotoLibrary.authorizationStatus()
+            if status == .authorized {
+                savePhotoBlock()
+            } else if status == .notDetermined {
+                PHPhotoLibrary.requestAuthorization { newStatus in
+                    if newStatus == .authorized {
+                        savePhotoBlock()
+                    }
+                }
             }
         }
     }
@@ -1529,23 +1822,71 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         if error != nil { return }
         
-        if self.isShareOn && !self.isBlackoutMode {
-            DispatchQueue.main.async { self.shareURL = ShareItem(url: outputFileURL) }
+        let targetUrl = outputFileURL
+        
+        self.generateThumbnail(for: outputFileURL) { [weak self] thumbnail in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                var captureItem = CaptureItem(url: outputFileURL, isVideo: true, thumbnail: thumbnail)
+                if let localId = self.assetIdentifiers[targetUrl] {
+                    captureItem.localIdentifier = localId
+                }
+                self.capturedItems.append(captureItem)
+                self.latestPhoto = thumbnail
+                
+                if self.isShareOn && !self.isBlackoutMode {
+                    self.shareURL = ShareItem(url: outputFileURL)
+                }
+            }
         }
         
-        PHPhotoLibrary.requestAuthorization { status in
+        let savedLocation = self.currentLocation
+        let saveVideoBlock = {
+            var placeholderLocalIdentifier: String?
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .video, fileURL: outputFileURL, options: nil)
+                if let location = savedLocation {
+                    request.location = location
+                }
+                placeholderLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
+            }) { [weak self] success, _ in
+                guard let self = self else { return }
+                if success, let localId = placeholderLocalIdentifier {
+                    DispatchQueue.main.async {
+                        self.assetIdentifiers[targetUrl] = localId
+                        if let index = self.capturedItems.firstIndex(where: { $0.url == targetUrl }) {
+                            self.capturedItems[index].localIdentifier = localId
+                        }
+                    }
+                }
+            }
+        }
+        
+        if #available(iOS 14, *) {
+            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
             if status == .authorized || status == .limited {
-                PHPhotoLibrary.shared().performChanges({
-                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
-                })
+                saveVideoBlock()
+            } else if status == .notDetermined {
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
+                    if newStatus == .authorized || newStatus == .limited {
+                        saveVideoBlock()
+                    }
+                }
+            }
+        } else {
+            let status = PHPhotoLibrary.authorizationStatus()
+            if status == .authorized {
+                saveVideoBlock()
+            } else if status == .notDetermined {
+                PHPhotoLibrary.requestAuthorization { newStatus in
+                    if newStatus == .authorized {
+                        saveVideoBlock()
+                    }
+                }
             }
         }
     }
-}
-
-struct ShareItem: Identifiable {
-    let id = UUID()
-    let url: URL
 }
 
 struct ShareSheet: UIViewControllerRepresentable {
@@ -1610,92 +1951,186 @@ struct CameraPreview: UIViewRepresentable {
     }
 }
 
+// MARK: - Local Session Preview Item View
+struct LocalAssetPreviewItemView: View {
+    let item: CaptureItem
+    @State private var player: AVPlayer? = nil
+    
+    var body: some View {
+        ZStack {
+            if item.isVideo {
+                if let player = player {
+                    VideoPlayer(player: player)
+                        .onAppear { player.play() }
+                        .onDisappear { player.pause() }
+                } else {
+                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+                }
+            } else {
+                if let uiImage = UIImage(contentsOfFile: item.url.path) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                } else if let thumb = item.thumbnail {
+                    Image(uiImage: thumb)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+                }
+            }
+        }
+        .onAppear {
+            if item.isVideo {
+                player = AVPlayer(url: item.url)
+            }
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
+    }
+}
+
+// MARK: - Photo Preview Sheet
 struct PhotoPreviewSheet: View {
-    let image: UIImage
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) var dismiss
-    @State private var isSharePresented = false
+    
+    @State private var currentIndex: Int = 0
+    @State private var shareURLItem: ShareItem? = nil
     
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if camera.capturedItems.isEmpty {
+                Text("촬영된 항목이 없습니다.")
+                    .font(.headline)
+                    .foregroundColor(.white)
+            } else {
+                TabView(selection: $currentIndex) {
+                    ForEach(Array(camera.capturedItems.enumerated()), id: \.element.id) { index, item in
+                        LocalAssetPreviewItemView(item: item)
+                            .tag(index)
+                    }
+                }
+                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
                 .ignoresSafeArea()
+            }
             
             VStack {
                 HStack {
                     Spacer()
                     Button(action: { dismiss() }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundColor(.white.opacity(0.9))
-                            .shadow(color: .black.opacity(0.6), radius: 3, x: 0, y: 2)
-                            .padding()
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Circle())
                     }
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .padding(.trailing, 16)
+                    .padding(.top, 16)
                 }
                 
                 Spacer()
                 
-                HStack(spacing: 50) {
-                    Button(action: {
-                        isSharePresented = true
-                    }) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 24))
-                            .foregroundColor(.white)
-                            .frame(width: 50, height: 50)
-                            .background(Color.black.opacity(0.5))
-                            .clipShape(Circle())
+                if !camera.capturedItems.isEmpty {
+                    HStack(spacing: 40) {
+                        Button(action: {
+                            prepareShareItem()
+                        }) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundColor(.white)
+                                .frame(width: 56, height: 56)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        
+                        Button(action: {
+                            deleteCurrentItem()
+                        }) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundColor(.red)
+                                .frame(width: 56, height: 56)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .circle)
                     }
-                    
-                    Button(action: {
-                        deleteLatestAsset()
-                    }) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 24))
-                            .foregroundColor(.red)
-                            .frame(width: 50, height: 50)
-                            .background(Color.black.opacity(0.5))
-                            .clipShape(Circle())
-                    }
+                    .padding(.bottom, 32)
                 }
-                .padding(.bottom, 40)
             }
+            .zIndex(100)
         }
-        .sheet(isPresented: $isSharePresented) {
-            ShareSheet(items: [image])
+        .sheet(item: $shareURLItem) { shareItem in
+            ShareSheet(items: [shareItem.url])
+        }
+        .onAppear {
+            if !camera.capturedItems.isEmpty {
+                currentIndex = max(0, camera.capturedItems.count - 1)
+            }
         }
     }
     
-    private func deleteLatestAsset() {
-        let fetchOptions = PHFetchOptions()
-        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        fetchOptions.fetchLimit = 1
+    private func prepareShareItem() {
+        guard !camera.capturedItems.isEmpty, currentIndex >= 0, currentIndex < camera.capturedItems.count else { return }
+        let item = camera.capturedItems[currentIndex]
+        self.shareURLItem = ShareItem(url: item.url)
+    }
+    
+    private func deleteCurrentItem() {
+        guard !camera.capturedItems.isEmpty, currentIndex >= 0, currentIndex < camera.capturedItems.count else { return }
+        let item = camera.capturedItems[currentIndex]
         
-        let fetchResult = PHAsset.fetchAssets(with: .image, options: fetchOptions)
-        
-        if let lastAsset = fetchResult.firstObject {
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.deleteAssets([lastAsset] as NSArray)
-            }) { success, _ in
-                if success {
-                    DispatchQueue.main.async {
-                        camera.latestPhoto = nil
-                        dismiss()
+        let deleteLocalAndUI = {
+            try? FileManager.default.removeItem(at: item.url)
+            DispatchQueue.main.async {
+                withAnimation {
+                    if let index = self.camera.capturedItems.firstIndex(where: { $0.id == item.id }) {
+                        self.camera.capturedItems.remove(at: index)
+                        if self.camera.capturedItems.isEmpty {
+                            self.camera.latestPhoto = nil
+                            self.dismiss()
+                        } else {
+                            self.currentIndex = min(self.currentIndex, max(0, self.camera.capturedItems.count - 1))
+                            self.camera.latestPhoto = self.camera.capturedItems[self.currentIndex].thumbnail
+                        }
                     }
                 }
             }
+        }
+        
+        let localId = item.localIdentifier ?? camera.assetIdentifiers[item.url]
+        
+        if let localId = localId {
+            PHPhotoLibrary.shared().performChanges({
+                let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localId], options: nil)
+                if let asset = assets.firstObject {
+                    PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+                }
+            }) { success, error in
+                if success {
+                    DispatchQueue.main.async {
+                        self.camera.assetIdentifiers.removeValue(forKey: item.url)
+                    }
+                    deleteLocalAndUI()
+                } else if let error = error {
+                    print("Delete error: \(error)")
+                }
+            }
         } else {
-            camera.latestPhoto = nil
-            dismiss()
+            deleteLocalAndUI()
         }
     }
 }
 
+// MARK: - Onboarding
 struct OnboardingOverlayView: View {
     @Binding var step: Int
     @ObservedObject var camera: CameraManager
@@ -1818,6 +2253,7 @@ struct OnboardingOverlayView: View {
     }
 }
 
+// MARK: - Camera Settings
 struct CameraSettingsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) var dismiss
@@ -1857,10 +2293,29 @@ struct CameraSettingsView: View {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Text("해상도").foregroundColor(.white)
                                     Picker("해상도", selection: $camera.qualityIndex) {
-                                        Text("1080p").tag(0)
-                                        Text("4K UHD").tag(1)
+                                        Text("일반 화질").tag(0)
+                                        Text("고화질 (원본)").tag(1)
                                     }
                                     .pickerStyle(.segmented)
+                                }
+                                .padding()
+                                
+                                Divider().background(Color.white.opacity(0.2))
+                                
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("프레임").foregroundColor(.white)
+                                    Picker("프레임", selection: $camera.fpsIndex) {
+                                        Text("30 fps").tag(0)
+                                        Text("60 fps").tag(1)
+                                    }
+                                    .pickerStyle(.segmented)
+                                    
+                                    if camera.fpsIndex == 1 {
+                                        Text("기기 환경에 따라 60fps가 적용되지 않을 수 있으며 60fps 적용 시 iOS 시스템 자체 제약으로 인해 화질 저하가 발생할 수 있습니다.")
+                                            .font(.caption2)
+                                            .foregroundColor(.yellow.opacity(0.8))
+                                            .padding(.top, 2)
+                                    }
                                 }
                                 .padding()
                                 
@@ -1904,7 +2359,7 @@ struct CameraSettingsView: View {
                     .padding(.horizontal)
                 }
             }
-            .padding(.top, 10)
+            .padding(.top, 20)
         }
         .presentationBackground(.clear)
         .presentationDetents([.medium, .large])
@@ -1919,10 +2374,10 @@ struct CameraSettingsView: View {
     
     func settingRatioPicker() -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("프레임 비율").foregroundColor(.white)
+            Text("촬영 비율").foregroundColor(.white)
             Picker("", selection: $camera.frameRatioIndex) {
-                Text("전체").tag(0)
-                Text("4:3").tag(1)
+                Text("전체 화면").tag(0)
+                Text("4:3 (권장)").tag(1)
                 Text("1:1").tag(2)
             }
             .pickerStyle(.segmented)
@@ -1931,6 +2386,7 @@ struct CameraSettingsView: View {
     }
 }
 
+// MARK: - Hidden Volume
 struct HiddenVolumeView: UIViewRepresentable {
     func makeUIView(context: Context) -> MPVolumeView {
         let volumeView = MPVolumeView(frame: .zero)
