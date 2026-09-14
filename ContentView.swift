@@ -631,6 +631,7 @@ class CameraManager: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var cachedScreenRatio: CGFloat = 19.5 / 9.0
     private var isAppActive: Bool = true
+    private var backgroundRecordingID: UIBackgroundTaskIdentifier = .invalid
     
     override init() {
         super.init()
@@ -671,7 +672,7 @@ class CameraManager: NSObject, ObservableObject {
             }
         }
         
-        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
         
         DispatchQueue.main.async {
@@ -690,8 +691,12 @@ class CameraManager: NSObject, ObservableObject {
         focusTimer?.invalidate()
     }
     
-    @objc private func appDidEnterBackground() {
+    @objc private func appWillResignActive() {
         isAppActive = false
+        if isRecording {
+            beginSaveBackgroundTask()
+            toggleRecording()
+        }
     }
     
     @objc private func appWillEnterForeground() {
@@ -699,6 +704,25 @@ class CameraManager: NSObject, ObservableObject {
             guard let self = self else { return }
             self.isAppActive = true
             self.lastVolume = AVAudioSession.sharedInstance().outputVolume
+        }
+    }
+    
+    private func beginSaveBackgroundTask() {
+        DispatchQueue.main.async {
+            if self.backgroundRecordingID == .invalid {
+                self.backgroundRecordingID = UIApplication.shared.beginBackgroundTask(withName: "VideoSaveTask") {
+                    self.endSaveBackgroundTask()
+                }
+            }
+        }
+    }
+    
+    private func endSaveBackgroundTask() {
+        DispatchQueue.main.async {
+            if self.backgroundRecordingID != .invalid {
+                UIApplication.shared.endBackgroundTask(self.backgroundRecordingID)
+                self.backgroundRecordingID = .invalid
+            }
         }
     }
     
@@ -966,6 +990,13 @@ class CameraManager: NSObject, ObservableObject {
             
             if self.captureSession.canAddOutput(self.videoDataOutput) { self.captureSession.addOutput(self.videoDataOutput) }
             if self.captureSession.canAddOutput(self.movieFileOutput) { self.captureSession.addOutput(self.movieFileOutput) }
+            
+            if let videoConnection = self.videoDataOutput.connection(with: .video), videoConnection.isVideoStabilizationSupported {
+                videoConnection.preferredVideoStabilizationMode = .auto
+            }
+            if let movieConnection = self.movieFileOutput.connection(with: .video), movieConnection.isVideoStabilizationSupported {
+                movieConnection.preferredVideoStabilizationMode = .auto
+            }
             
             self.applyOrientationConfiguration(uiOrientation: uiOrientation, captureDeviceOrientation: captureDeviceOrientation)
             
@@ -1320,6 +1351,7 @@ class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             if isRec {
+                self.beginSaveBackgroundTask()
                 self.movieFileOutput.stopRecording()
                 DispatchQueue.main.async {
                     self.showFloatingAlert("✅ 비디오가 저장되었습니다")
@@ -1423,6 +1455,12 @@ class CameraManager: NSObject, ObservableObject {
             
             if let connection = self.videoDataOutput.connection(with: .video) {
                 connection.isVideoMirrored = !self.isBackCamera
+                if connection.isVideoStabilizationSupported {
+                    connection.preferredVideoStabilizationMode = .auto
+                }
+            }
+            if let movieConnection = self.movieFileOutput.connection(with: .video), movieConnection.isVideoStabilizationSupported {
+                movieConnection.preferredVideoStabilizationMode = .auto
             }
             
             self.applyQualityAndFrameRate(ratioIndex: self.frameRatioIndex, qualityIndex: self.qualityIndex, fpsIndex: currentFpsIndex)
@@ -1820,7 +1858,15 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
     }
     
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        if error != nil { return }
+        var recordingSuccessful = true
+        if let error = error as NSError? {
+            recordingSuccessful = error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? false
+        }
+        
+        if !recordingSuccessful {
+            self.endSaveBackgroundTask()
+            return
+        }
         
         let targetUrl = outputFileURL
         
@@ -1860,6 +1906,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
                         }
                     }
                 }
+                self.endSaveBackgroundTask()
             }
         }
         
@@ -1871,8 +1918,12 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
                 PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
                     if newStatus == .authorized || newStatus == .limited {
                         saveVideoBlock()
+                    } else {
+                        self.endSaveBackgroundTask()
                     }
                 }
+            } else {
+                self.endSaveBackgroundTask()
             }
         } else {
             let status = PHPhotoLibrary.authorizationStatus()
@@ -1882,8 +1933,12 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
                 PHPhotoLibrary.requestAuthorization { newStatus in
                     if newStatus == .authorized {
                         saveVideoBlock()
+                    } else {
+                        self.endSaveBackgroundTask()
                     }
                 }
+            } else {
+                self.endSaveBackgroundTask()
             }
         }
     }
@@ -2311,7 +2366,7 @@ struct CameraSettingsView: View {
                                     .pickerStyle(.segmented)
                                     
                                     if camera.fpsIndex == 1 {
-                                        Text("기기 환경에 따라 60fps가 적용되지 않을 수 있으며 60fps 적용 시 iOS 시스템 자체 제약으로 인해 화질 저하가 발생할 수 있습니다.")
+                                        Text("기기 환경에 따라 60fps가 적용되지 않을 수 있으며 60fps 적용 시 iOS 시스템 제약으로 인해 화질 저하가 발생할 수 있습니다.")
                                             .font(.caption2)
                                             .foregroundColor(.yellow.opacity(0.8))
                                             .padding(.top, 2)
