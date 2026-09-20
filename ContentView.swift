@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AVFoundation
 import Photos
 import PhotosUI
@@ -252,15 +253,17 @@ struct CameraMainView: View {
                     
                     if camera.availableZoomFactors.count > 1 {
                         HStack(spacing: 15) {
+                            let activeFactor = camera.availableZoomFactors.sorted().filter { camera.currentZoomFactor >= ($0 - 0.01) }.last ?? camera.availableZoomFactors.first ?? 1.0
+
                             ForEach(camera.availableZoomFactors, id: \.self) { factor in
+                                let isActive = (factor == activeFactor)
                                 Button(action: {
                                     HapticManager.shared.playTimerTick()
                                     camera.setZoom(factor)
                                 }) {
-                                    Text(factor == 0.5 ? "0.5x" : String(format: "%.0fx", factor))
+                                    Text(isActive ? String(format: "%.1fx", camera.currentZoomFactor) : (factor == 0.5 ? "0.5x" : String(format: "%.0fx", factor)))
                                         .font(.system(size: 13, weight: .bold))
-                                        .foregroundColor(abs(camera.currentZoomFactor - factor) < 0.05 ? .yellow : nil)
-                                        .frame(width: 40, height: 40)
+                                        .foregroundColor(isActive ? .yellow : nil)                                        .frame(width: 40, height: 40)
                                         .glassEffect(.regular.interactive(), in: .circle)
                                         .contentShape(Circle())
                                 }
@@ -422,6 +425,27 @@ struct CameraMainView: View {
                         )
                 }
                 
+                if camera.isRecording {
+                    VStack {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 8, height: 8)
+                            
+                            Text(camera.formattedRecordingDuration)
+                                .font(.system(size: 13, weight: .bold).monospacedDigit())
+                                .foregroundColor(.white)
+                        }
+                        .frame(height: 36)
+                        .padding(.horizontal, 12)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                        .padding(.top, 55)
+                        
+                        Spacer()
+                    }
+                    .zIndex(15)
+                }
+                
                 if camera.isOnCall {
                     ZStack {
                         Color.black.ignoresSafeArea()
@@ -510,7 +534,7 @@ class CameraManager: NSObject, ObservableObject {
             UserDefaults.standard.set(isShutterSoundOn, forKey: "isShutterSoundOn")
         }
     }
-    @Published var volumeButtonAction: Int = UserDefaults.standard.object(forKey: "volumeButtonAction") as? Int ?? 0 {
+    @Published var volumeButtonAction: Int = UserDefaults.standard.object(forKey: "volumeButtonAction") as? Int ?? 2 {
         didSet {
             guard oldValue != volumeButtonAction else { return }
             UserDefaults.standard.set(volumeButtonAction, forKey: "volumeButtonAction")
@@ -574,6 +598,20 @@ class CameraManager: NSObject, ObservableObject {
     @Published var isOnCall = false
     private let callObserver = CXCallObserver()
     
+    @Published var recordingDuration: TimeInterval = 0
+    private var recordingTimer: Timer?
+    
+    var formattedRecordingDuration: String {
+        let hours = Int(recordingDuration) / 3600
+        let minutes = (Int(recordingDuration) % 3600) / 60
+        let seconds = Int(recordingDuration) % 60
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            return String(format: "%02d:%02d", minutes, seconds)
+        }
+    }
+    
     private var volumeObserver: NSKeyValueObservation?
     private var lastVolumePressTime = Date()
     private var lastVolume: Float = 0.5
@@ -633,6 +671,8 @@ class CameraManager: NSObject, ObservableObject {
     private var isAppActive: Bool = true
     private var backgroundRecordingID: UIBackgroundTaskIdentifier = .invalid
     
+    private var initialPinchZoomFactor: CGFloat = 1.0
+    
     override init() {
         super.init()
         
@@ -674,6 +714,9 @@ class CameraManager: NSObject, ObservableObject {
         
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleAudioInterruption(_:)), name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance())
+        NotificationCenter.default.addObserver(self, selector: #selector(handleAudioRouteChange(_:)), name: AVAudioSession.routeChangeNotification, object: AVAudioSession.sharedInstance())
+        NotificationCenter.default.addObserver(self, selector: #selector(handleSessionInterruption(_:)), name: AVCaptureSession.wasInterruptedNotification, object: captureSession)
         
         DispatchQueue.main.async {
             let bounds = UIApplication.shared.connectedScenes
@@ -689,6 +732,43 @@ class CameraManager: NSObject, ObservableObject {
         motionManager.stopAccelerometerUpdates()
         messageTimer?.invalidate()
         focusTimer?.invalidate()
+        recordingTimer?.invalidate()
+    }
+    
+    @objc private func handleAudioInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+        
+        if type == .began {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                if self.isRecording {
+                    self.toggleRecording()
+                }
+            }
+        } else if type == .ended {
+            sessionQueue.async { [weak self] in
+                self?.setupAudioSession()
+            }
+        }
+    }
+    
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        sessionQueue.async { [weak self] in
+            self?.setupAudioSession()
+        }
+    }
+    
+    @objc private func handleSessionInterruption(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.isRecording {
+                self.toggleRecording()
+            }
+        }
     }
     
     @objc private func appWillResignActive() {
@@ -700,6 +780,9 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     @objc private func appWillEnterForeground() {
+        sessionQueue.async { [weak self] in
+            self?.setupAudioSession()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self = self else { return }
             self.isAppActive = true
@@ -1011,7 +1094,7 @@ class CameraManager: NSObject, ObservableObject {
     private func applyQualityAndFrameRate(ratioIndex: Int, qualityIndex: Int, fpsIndex: Int) {
         guard let device = videoDeviceInput?.device else { return }
         let targetFPS: Double = fpsIndex == 1 ? 60.0 : 30.0
-        let isHighQuality = (qualityIndex == 1)
+        let isHighQuality = (qualityIndex == 1) && !(ratioIndex == 0 && fpsIndex == 1)
         let want4by3 = (ratioIndex != 0)
         
         var bestFormat: AVCaptureDevice.Format?
@@ -1138,6 +1221,9 @@ class CameraManager: NSObject, ObservableObject {
                 factors = [1.0, 2.0]
             } else {
                 factors = [1.0]
+                if camera.maxAvailableVideoZoomFactor >= 2.0 {
+                    factors.append(2.0)
+                }
             }
         }
         
@@ -1354,13 +1440,17 @@ class CameraManager: NSObject, ObservableObject {
                 self.beginSaveBackgroundTask()
                 self.movieFileOutput.stopRecording()
                 DispatchQueue.main.async {
+                    UIApplication.shared.isIdleTimerDisabled = false
+                    self.stopRecordingTimer()
                     self.showFloatingAlert("✅ 비디오가 저장되었습니다")
                 }
             } else {
-                do {
-                    try AVAudioSession.sharedInstance().setActive(true, options: [])
-                } catch {
-                    print("Failed to set active audio session: \(error)")
+                self.setupAudioSession()
+                
+                if let audioConnection = self.movieFileOutput.connection(with: .audio) {
+                    if !audioConnection.isEnabled {
+                        audioConnection.isEnabled = true
+                    }
                 }
                 
                 let tempDirectory = NSTemporaryDirectory()
@@ -1386,11 +1476,26 @@ class CameraManager: NSObject, ObservableObject {
                 
                 self.movieFileOutput.startRecording(to: URL(fileURLWithPath: filePath), recordingDelegate: self)
                 DispatchQueue.main.async {
+                    UIApplication.shared.isIdleTimerDisabled = true
+                    self.startRecordingTimer()
                     self.showFloatingAlert("🔴 비디오 녹화 시작")
                 }
             }
         }
         isRecording.toggle()
+    }
+    
+    private func startRecordingTimer() {
+        recordingDuration = 0
+        recordingTimer?.invalidate()
+        recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.recordingDuration += 1
+        }
+    }
+    
+    private func stopRecordingTimer() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
     }
     
     private func startTimer(completion: @escaping () -> Void) {
@@ -1418,6 +1523,8 @@ class CameraManager: NSObject, ObservableObject {
         let isAuto = self.isAutoFocusOn
         let expIndex = self.exposureIndex
         let currentFpsIndex = self.fpsIndex
+        
+        DispatchQueue.main.async { self.isChangingQuality = true }
         
         var currentDeviceOrientation = motionManager.isAccelerometerAvailable ? trueDeviceOrientation : UIDevice.current.orientation
         if currentDeviceOrientation == .faceUp || currentDeviceOrientation == .faceDown || currentDeviceOrientation == .unknown {
@@ -1447,6 +1554,9 @@ class CameraManager: NSObject, ObservableObject {
             guard let validNewCamera = newCamera,
                   let newInput = try? AVCaptureDeviceInput(device: validNewCamera) else {
                 self.captureSession.commitConfiguration()
+                DispatchQueue.main.async {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.isChangingQuality = false }
+                }
                 return
             }
             
@@ -1473,6 +1583,10 @@ class CameraManager: NSObject, ObservableObject {
             self.captureSession.commitConfiguration()
             
             self.updateCameraZoomFactors(camera: validNewCamera)
+            
+            DispatchQueue.main.async {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.isChangingQuality = false }
+            }
         }
     }
     
@@ -1550,7 +1664,7 @@ class CameraManager: NSObject, ObservableObject {
     
     func zoom(with gesture: UIPinchGestureRecognizer) {
         let state = gesture.state
-        let velocity = gesture.velocity
+        let scale = gesture.scale
         
         sessionQueue.async { [weak self] in
             guard let self = self, let device = self.videoDeviceInput?.device else { return }
@@ -1561,11 +1675,13 @@ class CameraManager: NSObject, ObservableObject {
                 let isUltraWideBase = (device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera)
                 let baseZoom: CGFloat = isUltraWideBase ? 0.5 : 1.0
                 
-                let maxAVZoom = min(device.activeFormat.videoMaxZoomFactor, 5.0 / baseZoom)
+                let maxAVZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
                 let minAVZoom = device.minAvailableVideoZoomFactor
                 
-                if state == .changed {
-                    let desiredAVZoomFactor = device.videoZoomFactor + atan2(velocity, 10.0)
+                if state == .began {
+                    self.initialPinchZoomFactor = device.videoZoomFactor
+                } else if state == .changed {
+                    let desiredAVZoomFactor = self.initialPinchZoomFactor * scale
                     let newAVZoom = max(minAVZoom, min(desiredAVZoomFactor, maxAVZoom))
                     device.videoZoomFactor = newAVZoom
                     
@@ -1597,6 +1713,25 @@ class CameraManager: NSObject, ObservableObject {
             } else {
                 completion(nil)
             }
+        }
+    }
+    
+    private func generatePhotoThumbnail(for url: URL, fallback: UIImage) -> UIImage {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true as CFBoolean,
+            kCGImageSourceCreateThumbnailWithTransform: true as CFBoolean,
+            kCGImageSourceThumbnailMaxPixelSize: 300 as CFNumber
+        ]
+        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            return UIImage(cgImage: cgImage)
+        }
+        
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 150, height: 150), format: format)
+        return renderer.image { _ in
+            fallback.draw(in: CGRect(x: 0, y: 0, width: 150, height: 150))
         }
     }
 }
@@ -1796,7 +1931,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("Captured_\(UUID().uuidString).jpg")
         try? mutableData.write(to: tempURL)
         
-        let thumbnailImage = UIImage(contentsOfFile: tempURL.path) ?? uiImage
+        let thumbnailImage = self.generatePhotoThumbnail(for: tempURL, fallback: uiImage)
         let captureItem = CaptureItem(url: tempURL, isVideo: false, thumbnail: thumbnailImage)
         let targetUrl = tempURL
         
@@ -1810,7 +1945,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         }
         
         let savedLocation = self.currentLocation
-        let savePhotoBlock = {
+        let savePhotoBlock = { [weak self] in
             var placeholderLocalIdentifier: String?
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
@@ -1863,6 +1998,14 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
             recordingSuccessful = error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? false
         }
         
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = false
+            if self.isRecording {
+                self.isRecording = false
+                self.stopRecordingTimer()
+            }
+        }
+        
         if !recordingSuccessful {
             self.endSaveBackgroundTask()
             return
@@ -1887,7 +2030,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         }
         
         let savedLocation = self.currentLocation
-        let saveVideoBlock = {
+        let saveVideoBlock = { [weak self] in
             var placeholderLocalIdentifier: String?
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
@@ -2200,7 +2343,7 @@ struct OnboardingOverlayView: View {
                     Text("환영합니다! 📸")
                         .font(.title2.bold())
                         .foregroundColor(.white)
-                    Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 있습니다.")
+                    Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 정할 수 있습니다.")
                         .multilineTextAlignment(.center)
                         .foregroundColor(.gray)
                         .padding()
@@ -2316,8 +2459,8 @@ struct CameraSettingsView: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.1)
-                .ignoresSafeArea()
                 .glassEffect(.regular, in: .rect)
+                .ignoresSafeArea()
             
             VStack(spacing: 20) {
                 HStack {
