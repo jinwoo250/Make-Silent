@@ -746,7 +746,7 @@ class CameraManager: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 if self.isRecording {
-                    self.toggleRecording()
+                    self.stopRecording()
                 }
             }
         } else if type == .ended {
@@ -766,7 +766,7 @@ class CameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             if self.isRecording {
-                self.toggleRecording()
+                self.stopRecording()
             }
         }
     }
@@ -775,7 +775,7 @@ class CameraManager: NSObject, ObservableObject {
         isAppActive = false
         if isRecording {
             beginSaveBackgroundTask()
-            toggleRecording()
+            stopRecording()
         }
     }
     
@@ -1411,9 +1411,7 @@ class CameraManager: NSObject, ObservableObject {
     
     func toggleRecording() {
         if isRecording {
-            HapticManager.shared.playVideoStop(isSoundOn: isShutterSoundOn)
-            executeToggleRecording()
-            if flashMode == 1 { setTorch(false) }
+            stopRecording()
         } else {
             if timerIndex > 0 && !isTimerRunning {
                 HapticManager.shared.playTimerTick()
@@ -1421,76 +1419,85 @@ class CameraManager: NSObject, ObservableObject {
                     guard let self = self else { return }
                     HapticManager.shared.playVideoStart(isSoundOn: self.isShutterSoundOn)
                     if self.flashMode == 1 { self.setTorch(true) }
-                    self.executeToggleRecording()
+                    self.executeStartRecording()
                 }
             } else if !isTimerRunning {
                 HapticManager.shared.playVideoStart(isSoundOn: isShutterSoundOn)
                 if flashMode == 1 { setTorch(true) }
-                executeToggleRecording()
+                executeStartRecording()
             }
         }
     }
     
-    private func executeToggleRecording() {
-        let isRec = self.isRecording
+    func stopRecording() {
+        guard isRecording else { return }
+        HapticManager.shared.playVideoStop(isSoundOn: isShutterSoundOn)
         
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            if isRec {
-                self.beginSaveBackgroundTask()
-                self.movieFileOutput.stopRecording()
-                DispatchQueue.main.async {
-                    UIApplication.shared.isIdleTimerDisabled = false
-                    self.stopRecordingTimer()
-                    self.showFloatingAlert("✅ 비디오가 저장되었습니다")
-                }
-            } else {
-                self.setupAudioSession()
-                
-                if let audioConnection = self.movieFileOutput.connection(with: .audio) {
-                    if !audioConnection.isEnabled {
-                        audioConnection.isEnabled = true
-                    }
-                }
-                
-                let tempDirectory = NSTemporaryDirectory()
-                let filePath = tempDirectory + "video_\(UUID().uuidString).mp4"
-                
-                if let location = self.currentLocation {
-                    let item = AVMutableMetadataItem()
-                    item.keySpace = .quickTimeMetadata
-                    item.key = AVMetadataKey.quickTimeMetadataKeyLocationISO6709 as NSString
-                    item.identifier = .quickTimeMetadataLocationISO6709
-                    
-                    let lat = location.coordinate.latitude
-                    let lon = location.coordinate.longitude
-                    let alt = location.altitude
-                    
-                    item.value = String(format: "%+08.4f%+09.4f%+08.3f/", lat, lon, alt) as NSString
-                    item.dataType = "com.apple.metadata.datatype.UTF-8"
-                    
-                    self.movieFileOutput.metadata = [item]
-                } else {
-                    self.movieFileOutput.metadata = []
-                }
-                
-                self.movieFileOutput.startRecording(to: URL(fileURLWithPath: filePath), recordingDelegate: self)
-                DispatchQueue.main.async {
-                    UIApplication.shared.isIdleTimerDisabled = true
-                    self.startRecordingTimer()
-                    self.showFloatingAlert("🔴 비디오 녹화 시작")
-                }
+            self.beginSaveBackgroundTask()
+            self.movieFileOutput.stopRecording()
+            DispatchQueue.main.async {
+                UIApplication.shared.isIdleTimerDisabled = false
+                self.stopRecordingTimer()
+                self.showFloatingAlert("✅ 비디오가 저장되었습니다")
             }
         }
-        isRecording.toggle()
+        
+        isRecording = false
+        if flashMode == 1 { setTorch(false) }
+    }
+    
+    private func executeStartRecording() {
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.setupAudioSession()
+            
+            if let audioConnection = self.movieFileOutput.connection(with: .audio) {
+                if !audioConnection.isEnabled {
+                    audioConnection.isEnabled = true
+                }
+            }
+            
+            let tempDirectory = NSTemporaryDirectory()
+            let filePath = tempDirectory + "video_\(UUID().uuidString).mp4"
+            
+            if let location = self.currentLocation {
+                let item = AVMutableMetadataItem()
+                item.keySpace = .quickTimeMetadata
+                item.key = AVMetadataKey.quickTimeMetadataKeyLocationISO6709 as NSString
+                item.identifier = .quickTimeMetadataLocationISO6709
+                
+                let lat = location.coordinate.latitude
+                let lon = location.coordinate.longitude
+                let alt = location.altitude
+                
+                item.value = String(format: "%+08.4f%+09.4f%+08.3f/", lat, lon, alt) as NSString
+                item.dataType = "com.apple.metadata.datatype.UTF-8"
+                
+                self.movieFileOutput.metadata = [item]
+            } else {
+                self.movieFileOutput.metadata = []
+            }
+            
+            self.movieFileOutput.startRecording(to: URL(fileURLWithPath: filePath), recordingDelegate: self)
+            DispatchQueue.main.async {
+                UIApplication.shared.isIdleTimerDisabled = true
+                self.startRecordingTimer()
+                self.showFloatingAlert("🔴 비디오 녹화 시작")
+            }
+        }
+        isRecording = true
     }
     
     private func startRecordingTimer() {
         recordingDuration = 0
         recordingTimer?.invalidate()
-        recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.recordingDuration += 1
         }
+        RunLoop.main.add(timer, forMode: .common)
+        recordingTimer = timer
     }
     
     private func stopRecordingTimer() {
@@ -1716,13 +1723,13 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
     
-    private func generatePhotoThumbnail(for url: URL, fallback: UIImage) -> UIImage {
+    private func generatePhotoThumbnail(from data: Data, fallback: UIImage) -> UIImage {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true as CFBoolean,
             kCGImageSourceCreateThumbnailWithTransform: true as CFBoolean,
             kCGImageSourceThumbnailMaxPixelSize: 300 as CFNumber
         ]
-        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        if let source = CGImageSourceCreateWithData(data as CFData, nil),
            let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
             return UIImage(cgImage: cgImage)
         }
@@ -1931,7 +1938,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("Captured_\(UUID().uuidString).jpg")
         try? mutableData.write(to: tempURL)
         
-        let thumbnailImage = self.generatePhotoThumbnail(for: tempURL, fallback: uiImage)
+        let thumbnailImage = self.generatePhotoThumbnail(from: mutableData as Data, fallback: uiImage)
         let captureItem = CaptureItem(url: tempURL, isVideo: false, thumbnail: thumbnailImage)
         let targetUrl = tempURL
         
@@ -2343,7 +2350,7 @@ struct OnboardingOverlayView: View {
                     Text("환영합니다! 📸")
                         .font(.title2.bold())
                         .foregroundColor(.white)
-                    Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 정할 수 있습니다.")
+                    Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 있습니다.")
                         .multilineTextAlignment(.center)
                         .foregroundColor(.gray)
                         .padding()
