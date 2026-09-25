@@ -673,7 +673,6 @@ class CameraManager: NSObject, ObservableObject {
     private var trueDeviceOrientation: UIDeviceOrientation = .portrait
     
     private let sessionQueue = DispatchQueue(label: "cameraSessionQueue")
-    private let writerQueue = DispatchQueue(label: "assetWriterQueue")
     
     private let ciContext = CIContext()
     private var cachedScreenRatio: CGFloat = 19.5 / 9.0
@@ -1410,29 +1409,27 @@ class CameraManager: NSObject, ObservableObject {
             let aInput = self.audioWriterInput
             self.writerLock.unlock()
             
-            self.writerQueue.async {
-                if let writer = writer, writer.status == .writing {
-                    vInput?.markAsFinished()
-                    aInput?.markAsFinished()
-                    writer.finishWriting {
-                        guard let outputURL = self.currentVideoURL else {
-                            self.endSaveBackgroundTask()
-                            return
-                        }
-                        let error = writer.error
-                        self.handleFinishedRecording(outputFileURL: outputURL, error: error)
-                        
-                        self.writerLock.lock()
-                        if self.assetWriter == writer {
-                            self.assetWriter = nil
-                            self.videoWriterInput = nil
-                            self.audioWriterInput = nil
-                        }
-                        self.writerLock.unlock()
+            if let writer = writer, writer.status == .writing {
+                vInput?.markAsFinished()
+                aInput?.markAsFinished()
+                writer.finishWriting {
+                    guard let outputURL = self.currentVideoURL else {
+                        self.endSaveBackgroundTask()
+                        return
                     }
-                } else {
-                    self.endSaveBackgroundTask()
+                    let error = writer.error
+                    self.handleFinishedRecording(outputFileURL: outputURL, error: error)
+                    
+                    self.writerLock.lock()
+                    if self.assetWriter == writer {
+                        self.assetWriter = nil
+                        self.videoWriterInput = nil
+                        self.audioWriterInput = nil
+                    }
+                    self.writerLock.unlock()
                 }
+            } else {
+                self.endSaveBackgroundTask()
             }
             
             DispatchQueue.main.async {
@@ -1852,50 +1849,30 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
     }
     
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        let isVideo = (output == self.videoDataOutput)
+        
         writerLock.lock()
-        let currentlyWriting = isWriting
-        writerLock.unlock()
-
-        if currentlyWriting {
-            let isVideo = (output == self.videoDataOutput)
+        if self.isWriting {
+            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             
-            self.writerLock.lock()
-            let isWritingNow = self.isWriting
-            let vWriter = self.videoWriterInput
-            let aWriter = self.audioWriterInput
-            let writerObj = self.assetWriter
-            var sTime = self.sessionAtSourceTime
-            self.writerLock.unlock()
+            if self.sessionAtSourceTime == nil && isVideo {
+                self.sessionAtSourceTime = timestamp
+                self.assetWriter?.startSession(atSourceTime: timestamp)
+            }
             
-            if isWritingNow {
-                let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                
-                if sTime == nil && isVideo {
-                    sTime = timestamp
-                    self.writerLock.lock()
-                    if self.sessionAtSourceTime == nil {
-                        self.sessionAtSourceTime = timestamp
-                        self.writerLock.unlock()
-                        writerObj?.startSession(atSourceTime: timestamp)
-                    } else {
-                        sTime = self.sessionAtSourceTime
-                        self.writerLock.unlock()
+            if let st = self.sessionAtSourceTime {
+                if isVideo {
+                    if let vInput = self.videoWriterInput, vInput.isReadyForMoreMediaData {
+                        vInput.append(sampleBuffer)
                     }
-                }
-                
-                if let st = sTime {
-                    if isVideo {
-                        if let vInput = vWriter, vInput.isReadyForMoreMediaData {
-                            vInput.append(sampleBuffer)
-                        }
-                    } else {
-                        if let aInput = aWriter, aInput.isReadyForMoreMediaData, timestamp >= st {
-                            aInput.append(sampleBuffer)
-                        }
+                } else {
+                    if let aInput = self.audioWriterInput, aInput.isReadyForMoreMediaData, timestamp >= st {
+                        aInput.append(sampleBuffer)
                     }
                 }
             }
         }
+        writerLock.unlock()
         
         if output == self.videoDataOutput {
             guard isTakingPicture else { return }
