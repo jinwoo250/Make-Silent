@@ -673,6 +673,7 @@ class CameraManager: NSObject, ObservableObject {
     private var trueDeviceOrientation: UIDeviceOrientation = .portrait
     
     private let sessionQueue = DispatchQueue(label: "cameraSessionQueue")
+    private let writerQueue = DispatchQueue(label: "assetWriterQueue")
     
     private let ciContext = CIContext()
     private var cachedScreenRatio: CGFloat = 19.5 / 9.0
@@ -881,7 +882,7 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func handleVolumeButtonPress(isUp: Bool) {
-        guard Date().timeIntervalSince(lastVolumePressTime) > 0.4 else { return }
+        guard Date().timeIntervalSince(lastVolumePressTime) > 0.2 else { return }
         lastVolumePressTime = Date()
         
         if volumeButtonAction == 0 {
@@ -896,7 +897,7 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func zoomStep(isZoomIn: Bool) {
-        let step: CGFloat = isZoomIn ? 1.1 : (1.0 / 1.1)
+        let step: CGFloat = isZoomIn ? 1.3 : (1.0 / 1.3)
         var newZoom = currentZoomFactor * step
         
         guard let device = videoDeviceInput?.device else { return }
@@ -1409,27 +1410,29 @@ class CameraManager: NSObject, ObservableObject {
             let aInput = self.audioWriterInput
             self.writerLock.unlock()
             
-            if let writer = writer, writer.status == .writing {
-                vInput?.markAsFinished()
-                aInput?.markAsFinished()
-                writer.finishWriting {
-                    guard let outputURL = self.currentVideoURL else {
-                        self.endSaveBackgroundTask()
-                        return
+            self.writerQueue.async {
+                if let writer = writer, writer.status == .writing {
+                    vInput?.markAsFinished()
+                    aInput?.markAsFinished()
+                    writer.finishWriting {
+                        guard let outputURL = self.currentVideoURL else {
+                            self.endSaveBackgroundTask()
+                            return
+                        }
+                        let error = writer.error
+                        self.handleFinishedRecording(outputFileURL: outputURL, error: error)
+                        
+                        self.writerLock.lock()
+                        if self.assetWriter == writer {
+                            self.assetWriter = nil
+                            self.videoWriterInput = nil
+                            self.audioWriterInput = nil
+                        }
+                        self.writerLock.unlock()
                     }
-                    let error = writer.error
-                    self.handleFinishedRecording(outputFileURL: outputURL, error: error)
-                    
-                    self.writerLock.lock()
-                    if self.assetWriter == writer {
-                        self.assetWriter = nil
-                        self.videoWriterInput = nil
-                        self.audioWriterInput = nil
-                    }
-                    self.writerLock.unlock()
+                } else {
+                    self.endSaveBackgroundTask()
                 }
-            } else {
-                self.endSaveBackgroundTask()
             }
             
             DispatchQueue.main.async {
@@ -1750,21 +1753,29 @@ class CameraManager: NSObject, ObservableObject {
             
             if shouldApply {
                 sessionQueue.async { [weak self] in
-                    guard let self = self, let device = self.videoDeviceInput?.device else { return }
+                    guard let self = self else { return }
+                    
+                    defer {
+                        self.zoomLock.lock()
+                        self._isApplyingZoom = false
+                        self.zoomLock.unlock()
+                    }
+                    
+                    guard let device = self.videoDeviceInput?.device else { return }
                     
                     while true {
                         self.zoomLock.lock()
-                        guard let target = self._targetAVZoom else {
-                            self._isApplyingZoom = false
-                            self.zoomLock.unlock()
-                            break
-                        }
+                        let target = self._targetAVZoom
                         self._targetAVZoom = nil
                         self.zoomLock.unlock()
                         
+                        guard let finalTarget = target else {
+                            break
+                        }
+                        
                         do {
                             try device.lockForConfiguration()
-                            device.videoZoomFactor = target
+                            device.videoZoomFactor = finalTarget
                             device.unlockForConfiguration()
                         } catch {}
                     }
@@ -1839,37 +1850,48 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         writerLock.lock()
         let currentlyWriting = isWriting
-        let vWriter = videoWriterInput
-        let aWriter = audioWriterInput
-        let writerObj = assetWriter
-        var sTime = sessionAtSourceTime
         writerLock.unlock()
 
         if currentlyWriting {
             let isVideo = (output == self.videoDataOutput)
-            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             
-            if sTime == nil && isVideo {
-                sTime = timestamp
-                writerLock.lock()
-                if sessionAtSourceTime == nil {
-                    sessionAtSourceTime = timestamp
-                    writerLock.unlock()
-                    writerObj?.startSession(atSourceTime: timestamp)
-                } else {
-                    sTime = sessionAtSourceTime
-                    writerLock.unlock()
-                }
-            }
-            
-            if let st = sTime {
-                if isVideo {
-                    if let vInput = vWriter, vInput.isReadyForMoreMediaData {
-                        vInput.append(sampleBuffer)
+            writerQueue.async { [weak self] in
+                guard let self = self else { return }
+                
+                self.writerLock.lock()
+                let isWritingNow = self.isWriting
+                let vWriter = self.videoWriterInput
+                let aWriter = self.audioWriterInput
+                let writerObj = self.assetWriter
+                var sTime = self.sessionAtSourceTime
+                self.writerLock.unlock()
+                
+                guard isWritingNow else { return }
+                
+                let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                
+                if sTime == nil && isVideo {
+                    sTime = timestamp
+                    self.writerLock.lock()
+                    if self.sessionAtSourceTime == nil {
+                        self.sessionAtSourceTime = timestamp
+                        self.writerLock.unlock()
+                        writerObj?.startSession(atSourceTime: timestamp)
+                    } else {
+                        sTime = self.sessionAtSourceTime
+                        self.writerLock.unlock()
                     }
-                } else {
-                    if let aInput = aWriter, aInput.isReadyForMoreMediaData, timestamp >= st {
-                        aInput.append(sampleBuffer)
+                }
+                
+                if let st = sTime {
+                    if isVideo {
+                        if let vInput = vWriter, vInput.isReadyForMoreMediaData {
+                            vInput.append(sampleBuffer)
+                        }
+                    } else {
+                        if let aInput = aWriter, aInput.isReadyForMoreMediaData, timestamp >= st {
+                            aInput.append(sampleBuffer)
+                        }
                     }
                 }
             }
@@ -1894,7 +1916,8 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
             let blkOn = self.isBlackoutMode
             let uiOri = self.lastUIOrientation
             let physOri = self.lastValidOrientation
-            let dLens = "\(UIDevice.current.model) \(self.videoDeviceInput?.device.localizedName ?? "Camera")"
+            let hwModel = UIDevice.hardwareIdentifier
+            let dLens = "\(hwModel) \(self.videoDeviceInput?.device.localizedName ?? "Camera")"
             let dFnum = self.videoDeviceInput?.device.lensAperture ?? 1.8
             
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2026,7 +2049,7 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
                 let currentDateString = dateFormatter.string(from: Date())
                 
                 tiffDict[kCGImagePropertyTIFFMake] = "Apple"
-                tiffDict[kCGImagePropertyTIFFModel] = UIDevice.current.model
+                tiffDict[kCGImagePropertyTIFFModel] = hwModel
                 
                 exifDict[kCGImagePropertyExifDateTimeOriginal] = currentDateString
                 exifDict[kCGImagePropertyExifDateTimeDigitized] = currentDateString
@@ -2731,4 +2754,17 @@ struct HiddenVolumeView: UIViewRepresentable {
         return volumeView
     }
     func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+}
+
+// MARK: - Hardware Identifier Extension
+extension UIDevice {
+    static var hardwareIdentifier: String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        return withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { ptr in
+                String(validatingUTF8: ptr) ?? "iPhone"
+            }
+        }
+    }
 }
