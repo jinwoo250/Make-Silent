@@ -637,7 +637,15 @@ class CameraManager: NSObject, ObservableObject {
     
     private var videoDeviceInput: AVCaptureDeviceInput?
     private let videoDataOutput = AVCaptureVideoDataOutput()
-    private let movieFileOutput = AVCaptureMovieFileOutput()
+    private let audioDataOutput = AVCaptureAudioDataOutput()
+    
+    private var assetWriter: AVAssetWriter?
+    private var videoWriterInput: AVAssetWriterInput?
+    private var audioWriterInput: AVAssetWriterInput?
+    private var isWriting = false
+    private var sessionAtSourceTime: CMTime?
+    private var currentVideoURL: URL?
+    private let writerLock = NSLock()
     
     private let captureLock = NSLock()
     private var _isTakingPicture = false
@@ -672,6 +680,9 @@ class CameraManager: NSObject, ObservableObject {
     private var backgroundRecordingID: UIBackgroundTaskIdentifier = .invalid
     
     private var initialPinchZoomFactor: CGFloat = 1.0
+    private var _targetAVZoom: CGFloat? = nil
+    private var _isApplyingZoom: Bool = false
+    private let zoomLock = NSLock()
     
     override init() {
         super.init()
@@ -757,8 +768,10 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     @objc private func handleAudioRouteChange(_ notification: Notification) {
-        sessionQueue.async { [weak self] in
-            self?.setupAudioSession()
+        if isRecording {
+            sessionQueue.async { [weak self] in
+                self?.setupAudioSession()
+            }
         }
     }
     
@@ -780,7 +793,7 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     @objc private func appWillEnterForeground() {
-        sessionQueue.async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.setupAudioSession()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -861,7 +874,7 @@ class CameraManager: NSObject, ObservableObject {
     private func setupAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers])
+            try audioSession.setCategory(.playAndRecord, mode: .videoRecording, options: [.defaultToSpeaker, .mixWithOthers])
             try audioSession.setAllowHapticsAndSystemSoundsDuringRecording(true)
             try audioSession.setActive(true)
         } catch {}
@@ -947,73 +960,26 @@ class CameraManager: NSObject, ObservableObject {
                     }
                 }
                 
-                if #available(iOS 14, *) {
-                    PHPhotoLibrary.requestAuthorization(for: .readWrite, handler: handler)
-                } else {
-                    PHPhotoLibrary.requestAuthorization(handler)
-                }
+                PHPhotoLibrary.requestAuthorization(for: .readWrite, handler: handler)
             }
         }
     }
     
     private func applyOrientationConfiguration(uiOrientation: UIInterfaceOrientation, captureDeviceOrientation: UIDeviceOrientation) {
-        if #available(iOS 17.0, *) {
-            let uiRotationAngle: CGFloat
-            switch uiOrientation {
-            case .portrait: uiRotationAngle = 90.0
-            case .portraitUpsideDown: uiRotationAngle = 270.0
-            case .landscapeLeft: uiRotationAngle = 180.0
-            case .landscapeRight: uiRotationAngle = 0.0
-            default: uiRotationAngle = 90.0
-            }
-            
-            if let videoConnection = self.videoDataOutput.connection(with: .video), videoConnection.isVideoRotationAngleSupported(uiRotationAngle) {
-                videoConnection.videoRotationAngle = uiRotationAngle
-            }
-            if let previewConnection = self.previewLayer.connection, previewConnection.isVideoRotationAngleSupported(uiRotationAngle) {
-                previewConnection.videoRotationAngle = uiRotationAngle
-            }
-            
-            let physicalRotationAngle: CGFloat
-            switch captureDeviceOrientation {
-            case .portrait: physicalRotationAngle = 90.0
-            case .portraitUpsideDown: physicalRotationAngle = 270.0
-            case .landscapeLeft: physicalRotationAngle = 0.0
-            case .landscapeRight: physicalRotationAngle = 180.0
-            default: physicalRotationAngle = 90.0
-            }
-            if let movieConnection = self.movieFileOutput.connection(with: .video), movieConnection.isVideoRotationAngleSupported(physicalRotationAngle) {
-                movieConnection.videoRotationAngle = physicalRotationAngle
-            }
-        } else {
-            let uiVideoOrientation: AVCaptureVideoOrientation
-            switch uiOrientation {
-            case .portrait: uiVideoOrientation = .portrait
-            case .portraitUpsideDown: uiVideoOrientation = .portraitUpsideDown
-            case .landscapeLeft: uiVideoOrientation = .landscapeLeft
-            case .landscapeRight: uiVideoOrientation = .landscapeRight
-            default: uiVideoOrientation = .portrait
-            }
-            
-            if let videoConnection = self.videoDataOutput.connection(with: .video), videoConnection.isVideoOrientationSupported {
-                videoConnection.videoOrientation = uiVideoOrientation
-            }
-            if let previewConnection = self.previewLayer.connection, previewConnection.isVideoOrientationSupported {
-                previewConnection.videoOrientation = uiVideoOrientation
-            }
-            
-            let physicalVideoOrientation: AVCaptureVideoOrientation
-            switch captureDeviceOrientation {
-            case .portrait: physicalVideoOrientation = .portrait
-            case .portraitUpsideDown: physicalVideoOrientation = .portraitUpsideDown
-            case .landscapeLeft: physicalVideoOrientation = .landscapeRight
-            case .landscapeRight: physicalVideoOrientation = .landscapeLeft
-            default: physicalVideoOrientation = .portrait
-            }
-            
-            if let movieConnection = self.movieFileOutput.connection(with: .video), movieConnection.isVideoOrientationSupported {
-                movieConnection.videoOrientation = physicalVideoOrientation
-            }
+        let uiRotationAngle: CGFloat
+        switch uiOrientation {
+        case .portrait: uiRotationAngle = 90.0
+        case .portraitUpsideDown: uiRotationAngle = 270.0
+        case .landscapeLeft: uiRotationAngle = 180.0
+        case .landscapeRight: uiRotationAngle = 0.0
+        default: uiRotationAngle = 90.0
+        }
+        
+        if let videoConnection = self.videoDataOutput.connection(with: .video), videoConnection.isVideoRotationAngleSupported(uiRotationAngle) {
+            videoConnection.videoRotationAngle = uiRotationAngle
+        }
+        if let previewConnection = self.previewLayer.connection, previewConnection.isVideoRotationAngleSupported(uiRotationAngle) {
+            previewConnection.videoRotationAngle = uiRotationAngle
         }
     }
     
@@ -1072,13 +1038,12 @@ class CameraManager: NSObject, ObservableObject {
             self.videoDataOutput.alwaysDiscardsLateVideoFrames = true
             
             if self.captureSession.canAddOutput(self.videoDataOutput) { self.captureSession.addOutput(self.videoDataOutput) }
-            if self.captureSession.canAddOutput(self.movieFileOutput) { self.captureSession.addOutput(self.movieFileOutput) }
+            
+            self.audioDataOutput.setSampleBufferDelegate(self, queue: videoQueue)
+            if self.captureSession.canAddOutput(self.audioDataOutput) { self.captureSession.addOutput(self.audioDataOutput) }
             
             if let videoConnection = self.videoDataOutput.connection(with: .video), videoConnection.isVideoStabilizationSupported {
-                videoConnection.preferredVideoStabilizationMode = .auto
-            }
-            if let movieConnection = self.movieFileOutput.connection(with: .video), movieConnection.isVideoStabilizationSupported {
-                movieConnection.preferredVideoStabilizationMode = .auto
+                videoConnection.preferredVideoStabilizationMode = .off
             }
             
             self.applyOrientationConfiguration(uiOrientation: uiOrientation, captureDeviceOrientation: captureDeviceOrientation)
@@ -1436,7 +1401,37 @@ class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             self.beginSaveBackgroundTask()
-            self.movieFileOutput.stopRecording()
+            
+            self.writerLock.lock()
+            self.isWriting = false
+            let writer = self.assetWriter
+            let vInput = self.videoWriterInput
+            let aInput = self.audioWriterInput
+            self.writerLock.unlock()
+            
+            if let writer = writer, writer.status == .writing {
+                vInput?.markAsFinished()
+                aInput?.markAsFinished()
+                writer.finishWriting {
+                    guard let outputURL = self.currentVideoURL else {
+                        self.endSaveBackgroundTask()
+                        return
+                    }
+                    let error = writer.error
+                    self.handleFinishedRecording(outputFileURL: outputURL, error: error)
+                    
+                    self.writerLock.lock()
+                    if self.assetWriter == writer {
+                        self.assetWriter = nil
+                        self.videoWriterInput = nil
+                        self.audioWriterInput = nil
+                    }
+                    self.writerLock.unlock()
+                }
+            } else {
+                self.endSaveBackgroundTask()
+            }
+            
             DispatchQueue.main.async {
                 UIApplication.shared.isIdleTimerDisabled = false
                 self.stopRecordingTimer()
@@ -1453,38 +1448,91 @@ class CameraManager: NSObject, ObservableObject {
             guard let self = self else { return }
             self.setupAudioSession()
             
-            if let audioConnection = self.movieFileOutput.connection(with: .audio) {
-                if !audioConnection.isEnabled {
-                    audioConnection.isEnabled = true
-                }
-            }
-            
             let tempDirectory = NSTemporaryDirectory()
             let filePath = tempDirectory + "video_\(UUID().uuidString).mp4"
+            let fileURL = URL(fileURLWithPath: filePath)
+            self.currentVideoURL = fileURL
             
-            if let location = self.currentLocation {
-                let item = AVMutableMetadataItem()
-                item.keySpace = .quickTimeMetadata
-                item.key = AVMetadataKey.quickTimeMetadataKeyLocationISO6709 as NSString
-                item.identifier = .quickTimeMetadataLocationISO6709
+            do {
+                let newAssetWriter = try AVAssetWriter(outputURL: fileURL, fileType: .mp4)
                 
-                let lat = location.coordinate.latitude
-                let lon = location.coordinate.longitude
-                let alt = location.altitude
+                var videoSettings = self.videoDataOutput.recommendedVideoSettingsForAssetWriter(writingTo: .mp4)
+                if videoSettings == nil {
+                    videoSettings = [
+                        AVVideoCodecKey: AVVideoCodecType.hevc,
+                        AVVideoWidthKey: 1920,
+                        AVVideoHeightKey: 1080
+                    ]
+                }
                 
-                item.value = String(format: "%+08.4f%+09.4f%+08.3f/", lat, lon, alt) as NSString
-                item.dataType = "com.apple.metadata.datatype.UTF-8"
+                let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+                vInput.expectsMediaDataInRealTime = true
                 
-                self.movieFileOutput.metadata = [item]
-            } else {
-                self.movieFileOutput.metadata = []
-            }
-            
-            self.movieFileOutput.startRecording(to: URL(fileURLWithPath: filePath), recordingDelegate: self)
-            DispatchQueue.main.async {
-                UIApplication.shared.isIdleTimerDisabled = true
-                self.startRecordingTimer()
-                self.showFloatingAlert("🔴 비디오 녹화 시작")
+                let uiAngle = self.getUIAngle(orientation: self.lastUIOrientation)
+                let physAngle = self.getDeviceAngle(orientation: self.lastValidOrientation)
+                let correctionAngle = (physAngle - uiAngle + 360) % 360
+                
+                var transform = CGAffineTransform.identity
+                if correctionAngle == 90 { transform = CGAffineTransform(rotationAngle: .pi / 2) }
+                else if correctionAngle == 180 { transform = CGAffineTransform(rotationAngle: .pi) }
+                else if correctionAngle == 270 { transform = CGAffineTransform(rotationAngle: -.pi / 2) }
+                vInput.transform = transform
+                
+                if newAssetWriter.canAdd(vInput) {
+                    newAssetWriter.add(vInput)
+                }
+                
+                var audioSettings = self.audioDataOutput.recommendedAudioSettingsForAssetWriter(writingTo: .mp4)
+                if audioSettings == nil {
+                    audioSettings = [
+                        AVFormatIDKey: kAudioFormatMPEG4AAC,
+                        AVNumberOfChannelsKey: 2,
+                        AVSampleRateKey: 44100.0,
+                        AVEncoderBitRateKey: 128000
+                    ]
+                }
+                let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                aInput.expectsMediaDataInRealTime = true
+                
+                if newAssetWriter.canAdd(aInput) {
+                    newAssetWriter.add(aInput)
+                }
+                
+                if let location = self.currentLocation {
+                    let item = AVMutableMetadataItem()
+                    item.keySpace = .quickTimeMetadata
+                    item.key = AVMetadataKey.quickTimeMetadataKeyLocationISO6709 as NSString
+                    item.identifier = .quickTimeMetadataLocationISO6709
+                    
+                    let lat = location.coordinate.latitude
+                    let lon = location.coordinate.longitude
+                    let alt = location.altitude
+                    
+                    item.value = String(format: "%+08.4f%+09.4f%+08.3f/", lat, lon, alt) as NSString
+                    item.dataType = "com.apple.metadata.datatype.UTF-8"
+                    
+                    newAssetWriter.metadata = [item]
+                }
+                
+                newAssetWriter.startWriting()
+                
+                self.writerLock.lock()
+                self.assetWriter = newAssetWriter
+                self.videoWriterInput = vInput
+                self.audioWriterInput = aInput
+                self.sessionAtSourceTime = nil
+                self.isWriting = true
+                self.writerLock.unlock()
+                
+                DispatchQueue.main.async {
+                    UIApplication.shared.isIdleTimerDisabled = true
+                    self.startRecordingTimer()
+                    self.showFloatingAlert("🔴 비디오 녹화 시작")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isRecording = false
+                }
             }
         }
         isRecording = true
@@ -1573,11 +1621,8 @@ class CameraManager: NSObject, ObservableObject {
             if let connection = self.videoDataOutput.connection(with: .video) {
                 connection.isVideoMirrored = !self.isBackCamera
                 if connection.isVideoStabilizationSupported {
-                    connection.preferredVideoStabilizationMode = .auto
+                    connection.preferredVideoStabilizationMode = .off
                 }
-            }
-            if let movieConnection = self.movieFileOutput.connection(with: .video), movieConnection.isVideoStabilizationSupported {
-                movieConnection.preferredVideoStabilizationMode = .auto
             }
             
             self.applyQualityAndFrameRate(ratioIndex: self.frameRatioIndex, qualityIndex: self.qualityIndex, fpsIndex: currentFpsIndex)
@@ -1673,30 +1718,63 @@ class CameraManager: NSObject, ObservableObject {
         let state = gesture.state
         let scale = gesture.scale
         
-        sessionQueue.async { [weak self] in
-            guard let self = self, let device = self.videoDeviceInput?.device else { return }
-            do {
-                try device.lockForConfiguration()
-                defer { device.unlockForConfiguration() }
-                
-                let isUltraWideBase = (device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera)
-                let baseZoom: CGFloat = isUltraWideBase ? 0.5 : 1.0
-                
-                let maxAVZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
-                let minAVZoom = device.minAvailableVideoZoomFactor
-                
-                if state == .began {
-                    self.initialPinchZoomFactor = device.videoZoomFactor
-                } else if state == .changed {
-                    let desiredAVZoomFactor = self.initialPinchZoomFactor * scale
-                    let newAVZoom = max(minAVZoom, min(desiredAVZoomFactor, maxAVZoom))
-                    device.videoZoomFactor = newAVZoom
+        guard let device = self.videoDeviceInput?.device else { return }
+        
+        let isUltraWideBase = (device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera)
+        let baseZoom: CGFloat = isUltraWideBase ? 0.5 : 1.0
+        
+        let maxAVZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
+        let minAVZoom = device.minAvailableVideoZoomFactor
+        
+        let maxUIZoom = maxAVZoom * baseZoom
+        let minUIZoom = minAVZoom * baseZoom
+        
+        if state == .began {
+            self.initialPinchZoomFactor = self.currentZoomFactor
+        }
+        
+        let desiredUIZoom = self.initialPinchZoomFactor * scale
+        let clampedUIZoom = max(minUIZoom, min(desiredUIZoom, maxUIZoom))
+        let targetAVZoom = clampedUIZoom / baseZoom
+        
+        if state == .changed {
+            self.currentZoomFactor = clampedUIZoom
+            
+            zoomLock.lock()
+            _targetAVZoom = targetAVZoom
+            let shouldApply = !_isApplyingZoom
+            if shouldApply {
+                _isApplyingZoom = true
+            }
+            zoomLock.unlock()
+            
+            if shouldApply {
+                sessionQueue.async { [weak self] in
+                    guard let self = self, let device = self.videoDeviceInput?.device else { return }
                     
-                    let newUIZoom = newAVZoom * baseZoom
-                    DispatchQueue.main.async {
-                        self.currentZoomFactor = newUIZoom
+                    while true {
+                        self.zoomLock.lock()
+                        guard let target = self._targetAVZoom else {
+                            self._isApplyingZoom = false
+                            self.zoomLock.unlock()
+                            break
+                        }
+                        self._targetAVZoom = nil
+                        self.zoomLock.unlock()
+                        
+                        do {
+                            try device.lockForConfiguration()
+                            device.videoZoomFactor = target
+                            device.unlockForConfiguration()
+                        } catch {}
                     }
-                } else if state == .ended || state == .cancelled {
+                }
+            }
+        } else if state == .ended || state == .cancelled {
+            sessionQueue.async { [weak self] in
+                guard let self = self, let device = self.videoDeviceInput?.device else { return }
+                do {
+                    try device.lockForConfiguration()
                     if self.isAutoFocusOn {
                         if device.isFocusModeSupported(.continuousAutoFocus) {
                             device.focusMode = .continuousAutoFocus
@@ -1705,8 +1783,9 @@ class CameraManager: NSObject, ObservableObject {
                             device.exposureMode = .continuousAutoExposure
                         }
                     }
-                }
-            } catch {}
+                    device.unlockForConfiguration()
+                } catch {}
+            }
         }
     }
     
@@ -1751,258 +1830,297 @@ extension CameraManager: CXCallObserverDelegate {
     }
 }
 
-extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureFileOutputRecordingDelegate {
+extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         currentLocation = locations.last
     }
     
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard isTakingPicture else { return }
-        isTakingPicture = false
-        
-        guard let cvBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        var ciImage = CIImage(cvImageBuffer: cvBuffer)
-        
-        if self.filterIndex == 1 {
-            if let filter = CIFilter(name: "CIPhotoEffectMono") {
-                filter.setValue(ciImage, forKey: kCIInputImageKey)
-                if let output = filter.outputImage { ciImage = output }
-            }
-        } else if self.filterIndex == 2 {
-            if let filter = CIFilter(name: "CISepiaTone") {
-                filter.setValue(ciImage, forKey: kCIInputImageKey)
-                filter.setValue(0.8, forKey: kCIInputIntensityKey)
-                if let output = filter.outputImage { ciImage = output }
-            }
-        }
-        
-        let uiAngle = self.getUIAngle(orientation: self.lastUIOrientation)
-        let physAngle = self.getDeviceAngle(orientation: self.lastValidOrientation)
-        let correctionAngle = (physAngle - uiAngle + 360) % 360
-        
-        var orientationCorrection: CGImagePropertyOrientation = .up
-        switch correctionAngle {
-        case 90: orientationCorrection = .right
-        case 180: orientationCorrection = .down
-        case 270: orientationCorrection = .left
-        default: orientationCorrection = .up
-        }
-        
-        ciImage = ciImage.oriented(orientationCorrection)
-        
-        let width = ciImage.extent.width
-        let height = ciImage.extent.height
-        let isPortrait = height > width
-        
-        let longSide = max(width, height)
-        let shortSide = min(width, height)
-        let currentRatio = longSide / shortSide
-        
-        var targetRatio: CGFloat = 1.0
-        if frameRatioIndex == 0 {
-            targetRatio = cachedScreenRatio
-        } else if frameRatioIndex == 1 {
-            targetRatio = 4.0 / 3.0
-        } else {
-            targetRatio = 1.0
-        }
-        
-        var cropRect = ciImage.extent
-        if currentRatio > targetRatio {
-            if isPortrait {
-                let newHeight = width * targetRatio
-                let y = ciImage.extent.origin.y + (height - newHeight) / 2
-                cropRect = CGRect(x: ciImage.extent.origin.x, y: y, width: width, height: newHeight)
-            } else {
-                let newWidth = height * targetRatio
-                let x = ciImage.extent.origin.x + (width - newWidth) / 2
-                cropRect = CGRect(x: x, y: ciImage.extent.origin.y, width: newWidth, height: height)
-            }
-        } else if currentRatio < targetRatio {
-            if isPortrait {
-                let newWidth = height / targetRatio
-                let x = ciImage.extent.origin.x + (width - newWidth) / 2
-                cropRect = CGRect(x: x, y: ciImage.extent.origin.y, width: newWidth, height: height)
-            } else {
-                let newHeight = width / targetRatio
-                let y = ciImage.extent.origin.y + (height - newHeight) / 2
-                cropRect = CGRect(x: ciImage.extent.origin.x, y: y, width: width, height: newHeight)
-            }
-        }
-        
-        ciImage = ciImage.cropped(to: cropRect.integral)
-        
-        guard let baseCGImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-        
-        let uiImage = UIImage(cgImage: baseCGImage, scale: 1.0, orientation: .up)
-        var finalCGImage = baseCGImage
-        
-        if self.isTimeStampOn {
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1.0
+        writerLock.lock()
+        let currentlyWriting = isWriting
+        let vWriter = videoWriterInput
+        let aWriter = audioWriterInput
+        let writerObj = assetWriter
+        var sTime = sessionAtSourceTime
+        writerLock.unlock()
+
+        if currentlyWriting {
+            let isVideo = (output == self.videoDataOutput)
+            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             
-            let renderer = UIGraphicsImageRenderer(size: uiImage.size, format: format)
-            let stampedUIImage = renderer.image { ctx in
-                uiImage.draw(at: .zero)
+            if sTime == nil && isVideo {
+                sTime = timestamp
+                writerLock.lock()
+                if sessionAtSourceTime == nil {
+                    sessionAtSourceTime = timestamp
+                    writerLock.unlock()
+                    writerObj?.startSession(atSourceTime: timestamp)
+                } else {
+                    sTime = sessionAtSourceTime
+                    writerLock.unlock()
+                }
+            }
+            
+            if let st = sTime {
+                if isVideo {
+                    if let vInput = vWriter, vInput.isReadyForMoreMediaData {
+                        vInput.append(sampleBuffer)
+                    }
+                } else {
+                    if let aInput = aWriter, aInput.isReadyForMoreMediaData, timestamp >= st {
+                        aInput.append(sampleBuffer)
+                    }
+                }
+            }
+        }
+        
+        if output == self.videoDataOutput {
+            guard isTakingPicture else { return }
+            isTakingPicture = false
+            
+            guard let cvBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            
+            var metadata = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault,
+                                                         target: sampleBuffer,
+                                                         attachmentMode: kCMAttachmentMode_ShouldPropagate) as? [CFString: Any] ?? [:]
+            
+            let loc = self.currentLocation
+            let fIndex = self.filterIndex
+            let rIndex = self.frameRatioIndex
+            let sRatio = self.cachedScreenRatio
+            let tsOn = self.isTimeStampOn
+            let sOn = self.isShareOn
+            let blkOn = self.isBlackoutMode
+            let uiOri = self.lastUIOrientation
+            let physOri = self.lastValidOrientation
+            let dLens = "\(UIDevice.current.model) \(self.videoDeviceInput?.device.localizedName ?? "Camera")"
+            let dFnum = self.videoDeviceInput?.device.lensAperture ?? 1.8
+            
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                var ciImage = CIImage(cvImageBuffer: cvBuffer)
+                
+                if fIndex == 1 {
+                    if let filter = CIFilter(name: "CIPhotoEffectMono") {
+                        filter.setValue(ciImage, forKey: kCIInputImageKey)
+                        if let output = filter.outputImage { ciImage = output }
+                    }
+                } else if fIndex == 2 {
+                    if let filter = CIFilter(name: "CISepiaTone") {
+                        filter.setValue(ciImage, forKey: kCIInputImageKey)
+                        filter.setValue(0.8, forKey: kCIInputIntensityKey)
+                        if let output = filter.outputImage { ciImage = output }
+                    }
+                }
+                
+                let uiAngle = self.getUIAngle(orientation: uiOri)
+                let physAngle = self.getDeviceAngle(orientation: physOri)
+                let correctionAngle = (physAngle - uiAngle + 360) % 360
+                
+                var orientationCorrection: CGImagePropertyOrientation = .up
+                switch correctionAngle {
+                case 90: orientationCorrection = .right
+                case 180: orientationCorrection = .down
+                case 270: orientationCorrection = .left
+                default: orientationCorrection = .up
+                }
+                
+                ciImage = ciImage.oriented(orientationCorrection)
+                
+                let width = ciImage.extent.width
+                let height = ciImage.extent.height
+                let isPortrait = height > width
+                
+                let longSide = max(width, height)
+                let shortSide = min(width, height)
+                let currentRatio = longSide / shortSide
+                
+                var targetRatio: CGFloat = 1.0
+                if rIndex == 0 {
+                    targetRatio = sRatio
+                } else if rIndex == 1 {
+                    targetRatio = 4.0 / 3.0
+                } else {
+                    targetRatio = 1.0
+                }
+                
+                var cropRect = ciImage.extent
+                if currentRatio > targetRatio {
+                    if isPortrait {
+                        let newHeight = width * targetRatio
+                        let y = ciImage.extent.origin.y + (height - newHeight) / 2
+                        cropRect = CGRect(x: ciImage.extent.origin.x, y: y, width: width, height: newHeight)
+                    } else {
+                        let newWidth = height * targetRatio
+                        let x = ciImage.extent.origin.x + (width - newWidth) / 2
+                        cropRect = CGRect(x: x, y: ciImage.extent.origin.y, width: newWidth, height: height)
+                    }
+                } else if currentRatio < targetRatio {
+                    if isPortrait {
+                        let newWidth = height / targetRatio
+                        let x = ciImage.extent.origin.x + (width - newWidth) / 2
+                        cropRect = CGRect(x: x, y: ciImage.extent.origin.y, width: newWidth, height: height)
+                    } else {
+                        let newHeight = width / targetRatio
+                        let y = ciImage.extent.origin.y + (height - newHeight) / 2
+                        cropRect = CGRect(x: ciImage.extent.origin.x, y: y, width: width, height: newHeight)
+                    }
+                }
+                
+                ciImage = ciImage.cropped(to: cropRect.integral)
+                
+                guard let baseCGImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+                
+                let uiImage = UIImage(cgImage: baseCGImage, scale: 1.0, orientation: .up)
+                var finalCGImage = baseCGImage
+                
+                if tsOn {
+                    let format = UIGraphicsImageRendererFormat()
+                    format.scale = 1.0
+                    
+                    let renderer = UIGraphicsImageRenderer(size: uiImage.size, format: format)
+                    let stampedUIImage = renderer.image { ctx in
+                        uiImage.draw(at: .zero)
+                        
+                        let dateFormatter = DateFormatter()
+                        dateFormatter.dateFormat = "yyyy.MM.dd HH:mm:ss"
+                        let dateStr = dateFormatter.string(from: Date())
+                        
+                        let fontSize = max(uiImage.size.width, uiImage.size.height) * 0.025
+                        let font = UIFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .bold)
+                        
+                        let shadow = NSShadow()
+                        shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
+                        shadow.shadowBlurRadius = 4
+                        shadow.shadowOffset = CGSize(width: 2, height: 2)
+                        
+                        let attrs: [NSAttributedString.Key: Any] = [
+                            .font: font,
+                            .foregroundColor: UIColor.systemOrange,
+                            .shadow: shadow
+                        ]
+                        
+                        let textSize = dateStr.size(withAttributes: attrs)
+                        let margin = fontSize
+                        let rect = CGRect(x: uiImage.size.width - textSize.width - margin,
+                                          y: uiImage.size.height - textSize.height - margin,
+                                          width: textSize.width, height: textSize.height)
+                        
+                        dateStr.draw(in: rect, withAttributes: attrs)
+                    }
+                    
+                    if let stampedCG = stampedUIImage.cgImage {
+                        finalCGImage = stampedCG
+                    }
+                }
+                
+                let mutableData = NSMutableData()
+                guard let destination = CGImageDestinationCreateWithData(mutableData, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+                
+                var exifDict = (metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+                var tiffDict = (metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
                 
                 let dateFormatter = DateFormatter()
-                dateFormatter.dateFormat = "yyyy.MM.dd HH:mm:ss"
-                let dateStr = dateFormatter.string(from: Date())
+                dateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+                let currentDateString = dateFormatter.string(from: Date())
                 
-                let fontSize = max(uiImage.size.width, uiImage.size.height) * 0.025
-                let font = UIFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .bold)
+                tiffDict[kCGImagePropertyTIFFMake] = "Apple"
+                tiffDict[kCGImagePropertyTIFFModel] = UIDevice.current.model
                 
-                let shadow = NSShadow()
-                shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
-                shadow.shadowBlurRadius = 4
-                shadow.shadowOffset = CGSize(width: 2, height: 2)
+                exifDict[kCGImagePropertyExifDateTimeOriginal] = currentDateString
+                exifDict[kCGImagePropertyExifDateTimeDigitized] = currentDateString
+                exifDict[kCGImagePropertyExifLensModel] = dLens
+                exifDict[kCGImagePropertyExifLensMake] = "Apple"
+                exifDict[kCGImagePropertyExifFNumber] = dFnum
                 
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: UIColor.systemOrange,
-                    .shadow: shadow
-                ]
+                metadata[kCGImagePropertyOrientation] = 1
+                metadata[kCGImagePropertyTIFFDictionary] = tiffDict
+                metadata[kCGImagePropertyExifDictionary] = exifDict
                 
-                let textSize = dateStr.size(withAttributes: attrs)
-                let margin = fontSize
-                let rect = CGRect(x: uiImage.size.width - textSize.width - margin,
-                                  y: uiImage.size.height - textSize.height - margin,
-                                  width: textSize.width, height: textSize.height)
-                
-                dateStr.draw(in: rect, withAttributes: attrs)
-            }
-            
-            if let stampedCG = stampedUIImage.cgImage {
-                finalCGImage = stampedCG
-            }
-        }
-        
-        let mutableData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(mutableData, UTType.jpeg.identifier as CFString, 1, nil) else { return }
-        
-        var metadata = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault,
-                                                     target: sampleBuffer,
-                                                     attachmentMode: kCMAttachmentMode_ShouldPropagate) as? [CFString: Any] ?? [:]
-        
-        var exifDict = (metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-        var tiffDict = (metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
-        
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        let currentDateString = dateFormatter.string(from: Date())
-        
-        let device = self.videoDeviceInput?.device
-        let lensModel = "\(UIDevice.current.model) \(device?.localizedName ?? "Camera")"
-        let fNumber = device?.lensAperture ?? 1.8
-        
-        tiffDict[kCGImagePropertyTIFFMake] = "Apple"
-        tiffDict[kCGImagePropertyTIFFModel] = UIDevice.current.model
-        
-        exifDict[kCGImagePropertyExifDateTimeOriginal] = currentDateString
-        exifDict[kCGImagePropertyExifDateTimeDigitized] = currentDateString
-        exifDict[kCGImagePropertyExifLensModel] = lensModel
-        exifDict[kCGImagePropertyExifLensMake] = "Apple"
-        exifDict[kCGImagePropertyExifFNumber] = fNumber
-        
-        metadata[kCGImagePropertyOrientation] = 1
-        metadata[kCGImagePropertyTIFFDictionary] = tiffDict
-        metadata[kCGImagePropertyExifDictionary] = exifDict
-        
-        if let location = self.currentLocation {
-            let gpsTimeFormatter = DateFormatter()
-            gpsTimeFormatter.dateFormat = "HH:mm:ss"
-            gpsTimeFormatter.timeZone = TimeZone(abbreviation: "UTC")
-            
-            let gpsDateFormatter = DateFormatter()
-            gpsDateFormatter.dateFormat = "yyyy:MM:dd"
-            gpsDateFormatter.timeZone = TimeZone(abbreviation: "UTC")
-            
-            let altRef = location.altitude >= 0 ? 0 : 1
-            
-            metadata[kCGImagePropertyGPSDictionary] = [
-                kCGImagePropertyGPSLatitude: abs(location.coordinate.latitude),
-                kCGImagePropertyGPSLatitudeRef: location.coordinate.latitude >= 0 ? "N" : "S",
-                kCGImagePropertyGPSLongitude: abs(location.coordinate.longitude),
-                kCGImagePropertyGPSLongitudeRef: location.coordinate.longitude >= 0 ? "E" : "W",
-                kCGImagePropertyGPSAltitude: abs(location.altitude),
-                kCGImagePropertyGPSAltitudeRef: altRef,
-                kCGImagePropertyGPSTimeStamp: gpsTimeFormatter.string(from: location.timestamp),
-                kCGImagePropertyGPSDateStamp: gpsDateFormatter.string(from: location.timestamp)
-            ]
-        }
-        
-        CGImageDestinationAddImage(destination, finalCGImage, metadata as CFDictionary)
-        CGImageDestinationFinalize(destination)
-        
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("Captured_\(UUID().uuidString).jpg")
-        try? mutableData.write(to: tempURL)
-        
-        let thumbnailImage = self.generatePhotoThumbnail(from: mutableData as Data, fallback: uiImage)
-        let captureItem = CaptureItem(url: tempURL, isVideo: false, thumbnail: thumbnailImage)
-        let targetUrl = tempURL
-        
-        DispatchQueue.main.async {
-            self.capturedItems.append(captureItem)
-            self.latestPhoto = captureItem.thumbnail
-            
-            if self.isShareOn && !self.isBlackoutMode {
-                self.shareURL = ShareItem(url: tempURL)
-            }
-        }
-        
-        let savedLocation = self.currentLocation
-        let savePhotoBlock = { [weak self] in
-            var placeholderLocalIdentifier: String?
-            PHPhotoLibrary.shared().performChanges({
-                let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, data: mutableData as Data, options: nil)
-                if let location = savedLocation {
-                    request.location = location
+                if let location = loc {
+                    let gpsTimeFormatter = DateFormatter()
+                    gpsTimeFormatter.dateFormat = "HH:mm:ss"
+                    gpsTimeFormatter.timeZone = TimeZone(abbreviation: "UTC")
+                    
+                    let gpsDateFormatter = DateFormatter()
+                    gpsDateFormatter.dateFormat = "yyyy:MM:dd"
+                    gpsDateFormatter.timeZone = TimeZone(abbreviation: "UTC")
+                    
+                    let altRef = location.altitude >= 0 ? 0 : 1
+                    
+                    metadata[kCGImagePropertyGPSDictionary] = [
+                        kCGImagePropertyGPSLatitude: abs(location.coordinate.latitude),
+                        kCGImagePropertyGPSLatitudeRef: location.coordinate.latitude >= 0 ? "N" : "S",
+                        kCGImagePropertyGPSLongitude: abs(location.coordinate.longitude),
+                        kCGImagePropertyGPSLongitudeRef: location.coordinate.longitude >= 0 ? "E" : "W",
+                        kCGImagePropertyGPSAltitude: abs(location.altitude),
+                        kCGImagePropertyGPSAltitudeRef: altRef,
+                        kCGImagePropertyGPSTimeStamp: gpsTimeFormatter.string(from: location.timestamp),
+                        kCGImagePropertyGPSDateStamp: gpsDateFormatter.string(from: location.timestamp)
+                    ]
                 }
-                placeholderLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
-            }) { [weak self] success, _ in
-                guard let self = self else { return }
-                if success, let localId = placeholderLocalIdentifier {
-                    DispatchQueue.main.async {
-                        self.assetIdentifiers[targetUrl] = localId
-                        if let index = self.capturedItems.firstIndex(where: { $0.url == targetUrl }) {
-                            self.capturedItems[index].localIdentifier = localId
+                
+                CGImageDestinationAddImage(destination, finalCGImage, metadata as CFDictionary)
+                CGImageDestinationFinalize(destination)
+                
+                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("Captured_\(UUID().uuidString).jpg")
+                try? mutableData.write(to: tempURL)
+                
+                let thumbnailImage = self.generatePhotoThumbnail(from: mutableData as Data, fallback: uiImage)
+                let captureItem = CaptureItem(url: tempURL, isVideo: false, thumbnail: thumbnailImage)
+                let targetUrl = tempURL
+                
+                DispatchQueue.main.async {
+                    self.capturedItems.append(captureItem)
+                    self.latestPhoto = captureItem.thumbnail
+                    
+                    if sOn && !blkOn {
+                        self.shareURL = ShareItem(url: tempURL)
+                    }
+                }
+                
+                let savePhotoBlock = { [weak self] in
+                    var placeholderLocalIdentifier: String?
+                    PHPhotoLibrary.shared().performChanges({
+                        let request = PHAssetCreationRequest.forAsset()
+                        request.addResource(with: .photo, data: mutableData as Data, options: nil)
+                        if let location = loc {
+                            request.location = location
+                        }
+                        placeholderLocalIdentifier = request.placeholderForCreatedAsset?.localIdentifier
+                    }) { [weak self] success, _ in
+                        guard let self = self else { return }
+                        if success, let localId = placeholderLocalIdentifier {
+                            DispatchQueue.main.async {
+                                self.assetIdentifiers[targetUrl] = localId
+                                if let index = self.capturedItems.firstIndex(where: { $0.url == targetUrl }) {
+                                    self.capturedItems[index].localIdentifier = localId
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
-        
-        if #available(iOS 14, *) {
-            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-            if status == .authorized || status == .limited {
-                savePhotoBlock()
-            } else if status == .notDetermined {
-                PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
-                    if newStatus == .authorized || newStatus == .limited {
-                        savePhotoBlock()
-                    }
-                }
-            }
-        } else {
-            let status = PHPhotoLibrary.authorizationStatus()
-            if status == .authorized {
-                savePhotoBlock()
-            } else if status == .notDetermined {
-                PHPhotoLibrary.requestAuthorization { newStatus in
-                    if newStatus == .authorized {
-                        savePhotoBlock()
+                
+                let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+                if status == .authorized || status == .limited {
+                    savePhotoBlock()
+                } else if status == .notDetermined {
+                    PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
+                        if newStatus == .authorized || newStatus == .limited {
+                            savePhotoBlock()
+                        }
                     }
                 }
             }
         }
     }
     
-    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+    private func handleFinishedRecording(outputFileURL: URL, error: Error?) {
         var recordingSuccessful = true
-        if let error = error as NSError? {
-            recordingSuccessful = error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? false
+        if let error = error {
+            recordingSuccessful = false
+            print("AssetWriter Error: \(error)")
         }
         
         DispatchQueue.main.async {
@@ -2060,36 +2178,19 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
             }
         }
         
-        if #available(iOS 14, *) {
-            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-            if status == .authorized || status == .limited {
-                saveVideoBlock()
-            } else if status == .notDetermined {
-                PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
-                    if newStatus == .authorized || newStatus == .limited {
-                        saveVideoBlock()
-                    } else {
-                        self.endSaveBackgroundTask()
-                    }
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .authorized || status == .limited {
+            saveVideoBlock()
+        } else if status == .notDetermined {
+            PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
+                if newStatus == .authorized || newStatus == .limited {
+                    saveVideoBlock()
+                } else {
+                    self.endSaveBackgroundTask()
                 }
-            } else {
-                self.endSaveBackgroundTask()
             }
         } else {
-            let status = PHPhotoLibrary.authorizationStatus()
-            if status == .authorized {
-                saveVideoBlock()
-            } else if status == .notDetermined {
-                PHPhotoLibrary.requestAuthorization { newStatus in
-                    if newStatus == .authorized {
-                        saveVideoBlock()
-                    } else {
-                        self.endSaveBackgroundTask()
-                    }
-                }
-            } else {
-                self.endSaveBackgroundTask()
-            }
+            self.endSaveBackgroundTask()
         }
     }
 }
@@ -2343,62 +2444,71 @@ struct OnboardingOverlayView: View {
     
     var body: some View {
         ZStack {
-            Color.black.opacity(0.5).ignoresSafeArea()
+            Color.black.opacity(0.4).ignoresSafeArea()
             VStack {
                 if step == 0 {
                     Spacer()
-                    Text("환영합니다! 📸")
-                        .font(.title2.bold())
-                        .foregroundColor(.white)
-                    Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 있습니다.")
-                        .multilineTextAlignment(.center)
-                        .foregroundColor(.gray)
-                        .padding()
-                    Button(action: {
-                        camera.requestPermissionsForOnboarding { _ in
-                            withAnimation(.easeInOut) { step = 1 }
-                        }
-                    }) {
-                        Text("다음")
-                            .font(.headline)
+                    VStack(spacing: 24) {
+                        Text("환영합니다! 📸")
+                            .font(.title2.bold())
                             .foregroundColor(.white)
-                            .padding()
-                            .frame(maxWidth: .infinity)
-                            .background(Color.accentColor)
-                            .cornerRadius(12)
-                            .padding(.horizontal, 40)
+                        Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 있습니다.")
+                            .multilineTextAlignment(.center)
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(action: {
+                            camera.requestPermissionsForOnboarding { _ in
+                                withAnimation(.easeInOut) { step = 1 }
+                            }
+                        }) {
+                            Text("다음")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                     }
+                    .padding(30)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                    .padding(.horizontal, 24)
                     Spacer()
                 } else if step == 1 {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 24) {
                         Text("👆 상단 컨트롤")
-                            .font(.title3.bold())
+                            .font(.title2.bold())
                             .foregroundColor(.white)
                         Text("이곳에서 타이머를 설정하거나\n설정으로 진입할 수 있습니다.")
                             .multilineTextAlignment(.center)
-                            .foregroundColor(.gray)
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                            .fixedSize(horizontal: false, vertical: true)
                         
                         Toggle("카메라 셔터 사운드", isOn: $camera.isShutterSoundOn)
                             .tint(.accentColor)
                             .foregroundColor(.white)
                             .padding()
-                            .background(Color.white.opacity(0.1))
-                            .cornerRadius(10)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 8)
+                            .glassEffect(.regular, in: .rect(cornerRadius: 12))
                         
-                        Button("확인했어요") {
+                        Button(action: {
                             if camera.isShutterSoundOn {
                                 showOnboardingSoundAlert = true
                             } else {
                                 withAnimation(.easeInOut) { step = 2 }
                             }
+                        }) {
+                            Text("확인했어요")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
-                        .background(Color.white.opacity(0.2))
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                         .alert("무음 모드 안내", isPresented: $showOnboardingSoundAlert) {
                             Button("계속 진행") {
                                 withAnimation(.easeInOut) { step = 2 }
@@ -2411,45 +2521,66 @@ struct OnboardingOverlayView: View {
                             Text("카메라 셔터 사운드가 켜져 있습니다. 무음 모드를 활성화하시겠습니까?")
                         }
                     }
+                    .padding(30)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                    .padding(.horizontal, 24)
                     .padding(.top, 120)
                     Spacer()
                 } else if step == 2 {
                     Spacer()
-                    VStack(spacing: 16) {
+                    VStack(spacing: 24) {
                         Text("🔋 절전 블랙 스크린 모드")
-                            .font(.title3.bold())
+                            .font(.title2.bold())
                             .foregroundColor(.white)
                         Text("화면이 꺼진 상태에서도 가볍게 탭하여 사진을,\n길게 눌러 영상을 촬영할 수 있습니다.\n위에서 아래로 스와이프하여 해제할 수 있습니다.")
                             .multilineTextAlignment(.center)
-                            .foregroundColor(.gray)
-                        Button("다음") {
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(action: {
                             withAnimation(.easeInOut) { step = 3 }
+                        }) {
+                            Text("다음")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
-                        .background(Color.white.opacity(0.2))
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                     }
+                    .padding(30)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                    .padding(.horizontal, 24)
                     Spacer()
                 } else if step == 3 {
                     Spacer()
-                    VStack(spacing: 16) {
+                    VStack(spacing: 24) {
                         Text("👇 하단 컨트롤")
-                            .font(.title3.bold())
+                            .font(.title2.bold())
                             .foregroundColor(.white)
                         Text("지금 바로 버튼을 눌러 사진과 영상을 촬영하고,\n멋진 결과물을 만들어보세요!")
                             .multilineTextAlignment(.center)
-                            .foregroundColor(.gray)
-                        Button("시작하기") {
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button(action: {
                             withAnimation(.easeInOut) { step = 4 }
+                        }) {
+                            Text("시작하기")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                     }
+                    .padding(30)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                    .padding(.horizontal, 24)
                     .padding(.bottom, 150)
                 }
             }
