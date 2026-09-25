@@ -1755,17 +1755,21 @@ class CameraManager: NSObject, ObservableObject {
                 sessionQueue.async { [weak self] in
                     guard let self = self else { return }
                     
-                    defer {
+                    guard let device = self.videoDeviceInput?.device else {
                         self.zoomLock.lock()
                         self._isApplyingZoom = false
                         self.zoomLock.unlock()
+                        return
                     }
-                    
-                    guard let device = self.videoDeviceInput?.device else { return }
                     
                     while true {
                         self.zoomLock.lock()
                         let target = self._targetAVZoom
+                        if target == nil {
+                            self._isApplyingZoom = false
+                            self.zoomLock.unlock()
+                            break
+                        }
                         self._targetAVZoom = nil
                         self.zoomLock.unlock()
                         
@@ -1855,19 +1859,15 @@ extension CameraManager: CLLocationManagerDelegate, AVCaptureVideoDataOutputSamp
         if currentlyWriting {
             let isVideo = (output == self.videoDataOutput)
             
-            writerQueue.async { [weak self] in
-                guard let self = self else { return }
-                
-                self.writerLock.lock()
-                let isWritingNow = self.isWriting
-                let vWriter = self.videoWriterInput
-                let aWriter = self.audioWriterInput
-                let writerObj = self.assetWriter
-                var sTime = self.sessionAtSourceTime
-                self.writerLock.unlock()
-                
-                guard isWritingNow else { return }
-                
+            self.writerLock.lock()
+            let isWritingNow = self.isWriting
+            let vWriter = self.videoWriterInput
+            let aWriter = self.audioWriterInput
+            let writerObj = self.assetWriter
+            var sTime = self.sessionAtSourceTime
+            self.writerLock.unlock()
+            
+            if isWritingNow {
                 let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 
                 if sTime == nil && isVideo {
@@ -2758,13 +2758,12 @@ struct HiddenVolumeView: UIViewRepresentable {
 
 // MARK: - Hardware Identifier Extension
 extension UIDevice {
-    static var hardwareIdentifier: String {
+    static let hardwareIdentifier: String = {
         var systemInfo = utsname()
         uname(&systemInfo)
-        return withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) { ptr in
-                String(validatingUTF8: ptr) ?? "iPhone"
-            }
+        return withUnsafeBytes(of: &systemInfo.machine) { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return "iPhone" }
+            return String(cString: baseAddress.assumingMemoryBound(to: CChar.self))
         }
-    }
+    }()
 }
