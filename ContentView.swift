@@ -83,410 +83,611 @@ class HapticManager {
 // MARK: - Main View
 struct CameraMainView: View {
     @StateObject private var camera = CameraManager()
+    @StateObject private var permissionManager = PermissionManager()
     @Namespace private var topBarNamespace
     @AppStorage("onboardingStep") private var onboardingStep = 0
     
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                Color.black.ignoresSafeArea()
-                
-                HiddenVolumeView().frame(width: 0, height: 0)
-                
-                Group {
-                    if camera.frameRatioIndex == 0 {
-                        CameraPreview(camera: camera)
-                            .overlay(
-                                Group {
-                                    if let focusPoint = camera.focusPoint {
-                                        Rectangle()
-                                            .stroke(Color.yellow, lineWidth: 1.5)
-                                            .frame(width: 70, height: 70)
-                                            .scaleEffect(camera.focusBoxScale)
-                                            .opacity(camera.focusBoxOpacity)
-                                            .position(focusPoint)
-                                            .allowsHitTesting(false)
-                                    }
-                                }
-                            )
-                            .ignoresSafeArea()
-                    } else {
-                        CameraPreview(camera: camera)
-                            .overlay(
-                                Group {
-                                    if let focusPoint = camera.focusPoint {
-                                        Rectangle()
-                                            .stroke(Color.yellow, lineWidth: 1.5)
-                                            .frame(width: 70, height: 70)
-                                            .scaleEffect(camera.focusBoxScale)
-                                            .opacity(camera.focusBoxOpacity)
-                                            .position(focusPoint)
-                                            .allowsHitTesting(false)
-                                    }
-                                }
-                            )
-                            .aspectRatio(camera.frameRatioIndex == 1 ? 3.0/4.0 : 1.0, contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if !permissionManager.isAllEssentialGranted {
+                PermissionGateView(permissionManager: permissionManager) {
+                    camera.checkPermissionsAndStart()
+                    if onboardingStep == 0 {
+                        withAnimation { onboardingStep = 1 }
                     }
                 }
-                .saturation(camera.filterIndex == 1 ? 0.0 : (camera.filterIndex == 2 ? 0.5 : 1.0))
-                .colorMultiply(camera.filterIndex == 2 ? Color(red: 1.1, green: 0.95, blue: 0.8) : .white)
-                .blur(radius: camera.isChangingQuality ? 15 : 0)
-                .overlay(Color.black.opacity(camera.isChangingQuality ? 0.4 : 0).ignoresSafeArea())
-                .animation(.easeInOut(duration: 0.3), value: camera.isChangingQuality)
-                
-                if let message = camera.floatingMessage, !camera.isBlackoutMode {
-                    VStack {
-                        Text(message)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.white)
-                            .padding(.vertical, 14)
-                            .padding(.horizontal, 28)
-                            .glassEffect(.regular.interactive(), in: .capsule)
-                            .shadow(color: .black.opacity(0.15), radius: 10, y: 5)
-                    }
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .scale(scale: 0.9)),
-                        removal: .opacity.combined(with: .scale(scale: 1.05))
-                    ))
-                    .animation(.spring(response: 0.4, dampingFraction: 0.8), value: camera.floatingMessage)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, 200)
-                    .zIndex(10)
-                }
-                
-                VStack {
-                    HStack(spacing: 6) {
-                        let commonHeight: CGFloat = 36
-                        let horizontalPadding: CGFloat = 12
+                .transition(.opacity)
+            } else {
+                GeometryReader { geometry in
+                    ZStack {
+                        Color.black.ignoresSafeArea()
                         
-                        GlassEffectContainer(spacing: 0) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "timer")
-                                    .font(.system(size: 13))
-                                Text(camera.timerIndex == 0 ? "꺼짐" : (camera.timerIndex == 1 ? "3초" : "10초"))
-                                    .font(.system(size: 13, weight: .bold))
-                            }
-                            .frame(height: commonHeight)
-                            .padding(.horizontal, horizontalPadding)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    camera.timerIndex = (camera.timerIndex + 1) % 3
-                                }
+                        HiddenVolumeView().frame(width: 0, height: 0)
+                        
+                        Group {
+                            if camera.frameRatioIndex == 0 {
+                                CameraPreview(camera: camera)
+                                    .overlay(
+                                        Group {
+                                            if let focusPoint = camera.focusPoint {
+                                                Rectangle()
+                                                    .stroke(Color.yellow, lineWidth: 1.5)
+                                                    .frame(width: 70, height: 70)
+                                                    .scaleEffect(camera.focusBoxScale)
+                                                    .opacity(camera.focusBoxOpacity)
+                                                    .position(focusPoint)
+                                                    .allowsHitTesting(false)
+                                            }
+                                        }
+                                    )
+                                    .ignoresSafeArea()
+                            } else {
+                                CameraPreview(camera: camera)
+                                    .overlay(
+                                        Group {
+                                            if let focusPoint = camera.focusPoint {
+                                                Rectangle()
+                                                    .stroke(Color.yellow, lineWidth: 1.5)
+                                                    .frame(width: 70, height: 70)
+                                                    .scaleEffect(camera.focusBoxScale)
+                                                    .opacity(camera.focusBoxOpacity)
+                                                    .position(focusPoint)
+                                                    .allowsHitTesting(false)
+                                            }
+                                        }
+                                    )
+                                    .aspectRatio(camera.frameRatioIndex == 1 ? 3.0/4.0 : 1.0, contentMode: .fit)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                         }
-                        .glassEffect(.regular.interactive(), in: .capsule)
+                        .saturation(camera.filterIndex == 1 ? 0.0 : (camera.filterIndex == 2 ? 0.5 : 1.0))
+                        .colorMultiply(camera.filterIndex == 2 ? Color(red: 1.1, green: 0.95, blue: 0.8) : .white)
+                        .blur(radius: camera.isChangingQuality ? 15 : 0)
+                        .overlay(Color.black.opacity(camera.isChangingQuality ? 0.4 : 0).ignoresSafeArea())
+                        .animation(.easeInOut(duration: 0.3), value: camera.isChangingQuality)
                         
-                        GlassEffectContainer(spacing: 0) {
-                            HStack(spacing: 6) {
-                                Image(systemName: camera.flashMode == 0 ? "bolt.slash.fill" : "bolt.fill")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(camera.flashMode == 1 ? .yellow : nil)
+                        if let message = camera.floatingMessage, !camera.isBlackoutMode {
+                            VStack {
+                                Text(message)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .padding(.vertical, 14)
+                                    .padding(.horizontal, 28)
+                                    .glassEffect(.regular.interactive(), in: .capsule)
+                                    .shadow(color: .black.opacity(0.15), radius: 10, y: 5)
                             }
-                            .frame(height: commonHeight)
-                            .padding(.horizontal, horizontalPadding)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    camera.flashMode = (camera.flashMode + 1) % 2
-                                }
-                            }
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 0.9)),
+                                removal: .opacity.combined(with: .scale(scale: 1.05))
+                            ))
+                            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: camera.floatingMessage)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                            .padding(.bottom, 200)
+                            .zIndex(10)
                         }
-                        .glassEffect(.regular.interactive(), in: .capsule)
                         
-                        GlassEffectContainer(spacing: 0) {
+                        VStack {
                             HStack(spacing: 6) {
-                                Image(systemName: "plusminus.circle")
-                                    .font(.system(size: 14))
-                                Text(camera.exposureText)
-                                    .font(.system(size: 13, weight: .bold))
-                            }
-                            .frame(height: commonHeight)
-                            .padding(.horizontal, horizontalPadding)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    camera.cycleExposure()
-                                }
-                            }
-                        }
-                        .glassEffect(.regular.interactive(), in: .capsule)
-                        
-                        Spacer()
-                        
-                        GlassEffectContainer(spacing: 0) {
-                            HStack(spacing: 6) {
-                                Text("절전")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundColor(camera.isBlackoutMode ? .red : nil)
+                                let commonHeight: CGFloat = 36
+                                let horizontalPadding: CGFloat = 12
                                 
-                                Toggle("", isOn: $camera.isBlackoutMode)
-                                    .labelsHidden()
-                                    .tint(.red)
-                                    .scaleEffect(0.8)
-                                    .frame(width: 45)
+                                GlassEffectContainer(spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "timer")
+                                            .font(.system(size: 13))
+                                        Text(camera.timerIndex == 0 ? "꺼짐" : (camera.timerIndex == 1 ? "3초" : "10초"))
+                                            .font(.system(size: 13, weight: .bold))
+                                    }
+                                    .frame(height: commonHeight)
+                                    .padding(.horizontal, horizontalPadding)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                            camera.timerIndex = (camera.timerIndex + 1) % 3
+                                        }
+                                    }
+                                }
+                                .glassEffect(.regular.interactive(), in: .capsule)
+                                
+                                GlassEffectContainer(spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: camera.flashMode == 0 ? "bolt.slash.fill" : "bolt.fill")
+                                            .font(.system(size: 14))
+                                            .foregroundColor(camera.flashMode == 1 ? .yellow : nil)
+                                    }
+                                    .frame(height: commonHeight)
+                                    .padding(.horizontal, horizontalPadding)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                            camera.flashMode = (camera.flashMode + 1) % 2
+                                        }
+                                    }
+                                }
+                                .glassEffect(.regular.interactive(), in: .capsule)
+                                
+                                GlassEffectContainer(spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "plusminus.circle")
+                                            .font(.system(size: 14))
+                                        Text(camera.exposureText)
+                                            .font(.system(size: 13, weight: .bold))
+                                    }
+                                    .frame(height: commonHeight)
+                                    .padding(.horizontal, horizontalPadding)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                            camera.cycleExposure()
+                                        }
+                                    }
+                                }
+                                .glassEffect(.regular.interactive(), in: .capsule)
+                                
+                                Spacer()
+                                
+                                GlassEffectContainer(spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Text("절전")
+                                            .font(.system(size: 13, weight: .bold))
+                                            .foregroundColor(camera.isBlackoutMode ? .red : nil)
+                                        
+                                        Toggle("", isOn: $camera.isBlackoutMode)
+                                            .labelsHidden()
+                                            .tint(.red)
+                                            .scaleEffect(0.8)
+                                            .frame(width: 45)
+                                    }
+                                    .frame(height: commonHeight)
+                                    .padding(.horizontal, horizontalPadding)
+                                }
+                                .glassEffect(.regular, in: .capsule)
+                                
+                                GlassEffectContainer(spacing: 0) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "gearshape.fill")
+                                            .font(.system(size: 14))
+                                    }
+                                    .frame(height: commonHeight)
+                                    .padding(.horizontal, horizontalPadding)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        camera.showSettings = true
+                                    }
+                                }
+                                .glassEffect(.regular.interactive(), in: .capsule)
                             }
-                            .frame(height: commonHeight)
-                            .padding(.horizontal, horizontalPadding)
-                        }
-                        .glassEffect(.regular, in: .capsule)
-                        
-                        GlassEffectContainer(spacing: 0) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "gearshape.fill")
-                                    .font(.system(size: 14))
-                            }
-                            .frame(height: commonHeight)
-                            .padding(.horizontal, horizontalPadding)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                camera.showSettings = true
-                            }
-                        }
-                        .glassEffect(.regular.interactive(), in: .capsule)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 10)
-                    
-                    Spacer()
-                    
-                    if camera.availableZoomFactors.count > 1 {
-                        HStack(spacing: 15) {
-                            let activeFactor = camera.availableZoomFactors.sorted().filter { camera.currentZoomFactor >= ($0 - 0.01) }.last ?? camera.availableZoomFactors.first ?? 1.0
-
-                            ForEach(camera.availableZoomFactors, id: \.self) { factor in
-                                let isActive = (factor == activeFactor)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 10)
+                            
+                            Spacer()
+                            
+                            if camera.availableZoomFactors.count > 1 {
+                                HStack(spacing: 15) {
+                                    let activeFactor = camera.availableZoomFactors.sorted().filter { camera.currentZoomFactor >= ($0 - 0.01) }.last ?? camera.availableZoomFactors.first ?? 1.0
+                                    
+                                    ForEach(camera.availableZoomFactors, id: \.self) { factor in
+                                        let isActive = (factor == activeFactor)
+                                        Button(action: {
+                                            HapticManager.shared.playTimerTick()
+                                            camera.setZoom(factor)
+                                        }) {
+                                            Text(isActive ? String(format: "%.1fx", camera.currentZoomFactor) : (factor == 0.5 ? "0.5x" : String(format: "%.0fx", factor)))
+                                                .font(.system(size: 13, weight: .bold))
+                                                .foregroundColor(isActive ? .yellow : nil)                                        .frame(width: 40, height: 40)
+                                                .glassEffect(.regular.interactive(), in: .circle)
+                                                .contentShape(Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.bottom, 12)
+                            } else {
                                 Button(action: {
                                     HapticManager.shared.playTimerTick()
-                                    camera.setZoom(factor)
+                                    camera.cycleZoom()
                                 }) {
-                                    Text(isActive ? String(format: "%.1fx", camera.currentZoomFactor) : (factor == 0.5 ? "0.5x" : String(format: "%.0fx", factor)))
+                                    Text(String(format: "%.1fx", camera.currentZoomFactor))
                                         .font(.system(size: 13, weight: .bold))
-                                        .foregroundColor(isActive ? .yellow : nil)                                        .frame(width: 40, height: 40)
+                                        .foregroundColor(.white)
+                                        .frame(width: 40, height: 40)
                                         .glassEffect(.regular.interactive(), in: .circle)
                                         .contentShape(Circle())
                                 }
                                 .buttonStyle(.plain)
+                                .padding(.bottom, 10)
                             }
-                        }
-                        .padding(.bottom, 12)
-                    } else {
-                        Button(action: {
-                            HapticManager.shared.playTimerTick()
-                            camera.cycleZoom()
-                        }) {
-                            Text(String(format: "%.1fx", camera.currentZoomFactor))
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 40, height: 40)
-                                .glassEffect(.regular.interactive(), in: .circle)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.bottom, 10)
-                    }
-                    
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 32)
-                            .fill(Color.clear)
-                            .glassEffect(.clear, in: .rect(cornerRadius: 32))
-                            .shadow(color: Color.black.opacity(0.2), radius: 25, y: 15)
-                        
-                        HStack(alignment: .center) {
-                            HStack(spacing: 6) {
-                                if camera.showPreview {
-                                    Button(action: {
-                                        if camera.latestPhoto != nil {
-                                            camera.showPhotoPreviewSheet = true
-                                        }
-                                    }) {
-                                        Group {
-                                            if let img = camera.latestPhoto {
-                                                Image(uiImage: img)
-                                                    .resizable()
-                                                    .aspectRatio(contentMode: .fill)
-                                                    .frame(width: 36, height: 36)
-                                                    .clipShape(Circle())
-                                            } else {
-                                                Image(systemName: "photo")
-                                                    .font(.title2)
+                            
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 32)
+                                    .fill(Color.clear)
+                                    .glassEffect(.clear, in: .rect(cornerRadius: 32))
+                                    .shadow(color: Color.black.opacity(0.2), radius: 25, y: 15)
+                                
+                                HStack(alignment: .center) {
+                                    HStack(spacing: 6) {
+                                        if camera.showPreview {
+                                            Button(action: {
+                                                if camera.latestPhoto != nil {
+                                                    camera.showPhotoPreviewSheet = true
+                                                }
+                                            }) {
+                                                Group {
+                                                    if let img = camera.latestPhoto {
+                                                        Image(uiImage: img)
+                                                            .resizable()
+                                                            .aspectRatio(contentMode: .fill)
+                                                            .frame(width: 36, height: 36)
+                                                            .clipShape(Circle())
+                                                    } else {
+                                                        Image(systemName: "photo")
+                                                            .font(.title2)
+                                                    }
+                                                }
+                                                .frame(width: 64, height: 54)
+                                                .contentShape(Rectangle())
                                             }
+                                            .buttonStyle(.plain)
+                                            .glassEffect(.regular.interactive(), in: .capsule)
+                                            .transition(.scale)
                                         }
-                                        .frame(width: 64, height: 54)
-                                        .contentShape(Rectangle())
+                                        
+                                        Button(action: { camera.switchCamera() }) {
+                                            Image(systemName: "arrow.triangle.2.circlepath")
+                                                .font(.title2.weight(.medium))
+                                                .frame(width: 64, height: 54)
+                                                .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .glassEffect(.regular.interactive(), in: .capsule)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    
+                                    Button(action: {
+                                        camera.takePhoto()
+                                    }) {
+                                        ZStack {
+                                            Circle()
+                                                .fill(Color.white.opacity(0.05))
+                                                .frame(width: 72, height: 72)
+                                                .glassEffect(.regular.interactive(), in: .circle)
+                                            
+                                            Circle()
+                                                .fill(Color.white)
+                                                .frame(width: 56, height: 56)
+                                            
+                                            Circle()
+                                                .stroke(Color.white.opacity(0.8), lineWidth: 2)
+                                                .frame(width: 72, height: 72)
+                                        }
+                                        .contentShape(Circle())
                                     }
                                     .buttonStyle(.plain)
-                                    .glassEffect(.regular.interactive(), in: .capsule)
-                                    .transition(.scale)
-                                }
-                                
-                                Button(action: { camera.switchCamera() }) {
-                                    Image(systemName: "arrow.triangle.2.circlepath")
-                                        .font(.title2.weight(.medium))
-                                        .frame(width: 64, height: 54)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .glassEffect(.regular.interactive(), in: .capsule)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            
-                            Button(action: {
-                                camera.takePhoto()
-                            }) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.white.opacity(0.05))
-                                        .frame(width: 72, height: 72)
-                                        .glassEffect(.regular.interactive(), in: .circle)
                                     
-                                    Circle()
-                                        .fill(Color.white)
-                                        .frame(width: 56, height: 56)
-                                    
-                                    Circle()
-                                        .stroke(Color.white.opacity(0.8), lineWidth: 2)
-                                        .frame(width: 72, height: 72)
+                                    HStack(spacing: 6) {
+                                        Button(action: {
+                                            camera.toggleRecording()
+                                        }) {
+                                            Image(systemName: camera.isRecording ? "stop.fill" : "record.circle")
+                                                .font(.title2.weight(.bold))
+                                                .foregroundColor(camera.isRecording ? .red : nil)
+                                                .frame(width: 64, height: 54)
+                                                .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .glassEffect(.regular.interactive(), in: .capsule)
+                                        
+                                        Menu {
+                                            Button(action: { camera.filterIndex = 0 }) {
+                                                Text("원본")
+                                                if camera.filterIndex == 0 { Image(systemName: "checkmark") }
+                                            }
+                                            Button(action: { camera.filterIndex = 1 }) {
+                                                Text("흑백")
+                                                if camera.filterIndex == 1 { Image(systemName: "checkmark") }
+                                            }
+                                            Button(action: { camera.filterIndex = 2 }) {
+                                                Text("세피아")
+                                                if camera.filterIndex == 2 { Image(systemName: "checkmark") }
+                                            }
+                                        } label: {
+                                            Image(systemName: "camera.filters")
+                                                .font(.title2.weight(.medium))
+                                                .foregroundColor(.white)
+                                                .frame(width: 64, height: 54)
+                                                .contentShape(Rectangle())
+                                        }
+                                        .glassEffect(.regular.interactive(), in: .capsule)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
                                 }
-                                .contentShape(Circle())
+                                .padding(12)
                             }
-                            .buttonStyle(.plain)
-                            
-                            HStack(spacing: 6) {
-                                Button(action: {
-                                    camera.toggleRecording()
-                                }) {
-                                    Image(systemName: camera.isRecording ? "stop.fill" : "record.circle")
-                                        .font(.title2.weight(.bold))
-                                        .foregroundColor(camera.isRecording ? .red : nil)
-                                        .frame(width: 64, height: 54)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .glassEffect(.regular.interactive(), in: .capsule)
-                                
-                                Menu {
-                                    Button(action: { camera.filterIndex = 0 }) {
-                                        Text("원본")
-                                        if camera.filterIndex == 0 { Image(systemName: "checkmark") }
-                                    }
-                                    Button(action: { camera.filterIndex = 1 }) {
-                                        Text("흑백")
-                                        if camera.filterIndex == 1 { Image(systemName: "checkmark") }
-                                    }
-                                    Button(action: { camera.filterIndex = 2 }) {
-                                        Text("세피아")
-                                        if camera.filterIndex == 2 { Image(systemName: "checkmark") }
-                                    }
-                                } label: {
-                                    Image(systemName: "camera.filters")
-                                        .font(.title2.weight(.medium))
-                                        .foregroundColor(.white)
-                                        .frame(width: 64, height: 54)
-                                        .contentShape(Rectangle())
-                                }
-                                .glassEffect(.regular.interactive(), in: .capsule)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 24)
                         }
-                        .padding(12)
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 24)
-                }
-                
-                if camera.isBlackoutMode {
-                    Color.black
-                        .ignoresSafeArea()
-                        .zIndex(100)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            HapticManager.shared.playPhoto(isSoundOn: camera.isShutterSoundOn)
-                            camera.takePhoto()
-                        }
-                        .onLongPressGesture(minimumDuration: 0.5) {
-                            if camera.isRecording {
-                                HapticManager.shared.playVideoStop(isSoundOn: camera.isShutterSoundOn)
-                            } else {
-                                HapticManager.shared.playVideoStart(isSoundOn: camera.isShutterSoundOn)
-                            }
-                            camera.toggleRecording()
-                        }
-                        .gesture(
-                            DragGesture(minimumDistance: 50)
-                                .onEnded { value in
-                                    if value.translation.height > 50 {
-                                        HapticManager.shared.playExit()
-                                        camera.isBlackoutMode = false
-                                    }
-                                }
-                        )
-                }
-                
-                if camera.isRecording {
-                    VStack {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(Color.red)
-                                .frame(width: 8, height: 8)
-                            
-                            Text(camera.formattedRecordingDuration)
-                                .font(.system(size: 13, weight: .bold).monospacedDigit())
-                                .foregroundColor(.white)
-                        }
-                        .frame(height: 36)
-                        .padding(.horizontal, 12)
-                        .glassEffect(.regular.interactive(), in: .capsule)
-                        .padding(.top, 55)
                         
-                        Spacer()
+                        if camera.isBlackoutMode {
+                            Color.black
+                                .ignoresSafeArea()
+                                .zIndex(100)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    HapticManager.shared.playPhoto(isSoundOn: camera.isShutterSoundOn)
+                                    camera.takePhoto()
+                                }
+                                .onLongPressGesture(minimumDuration: 0.5) {
+                                    if camera.isRecording {
+                                        HapticManager.shared.playVideoStop(isSoundOn: camera.isShutterSoundOn)
+                                    } else {
+                                        HapticManager.shared.playVideoStart(isSoundOn: camera.isShutterSoundOn)
+                                    }
+                                    camera.toggleRecording()
+                                }
+                                .gesture(
+                                    DragGesture(minimumDistance: 50)
+                                        .onEnded { value in
+                                            if value.translation.height > 50 {
+                                                HapticManager.shared.playExit()
+                                                camera.isBlackoutMode = false
+                                            }
+                                        }
+                                )
+                        }
+                        
+                        if camera.isRecording {
+                            VStack {
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(Color.red)
+                                        .frame(width: 8, height: 8)
+                                    
+                                    Text(camera.formattedRecordingDuration)
+                                        .font(.system(size: 13, weight: .bold).monospacedDigit())
+                                        .foregroundColor(.white)
+                                }
+                                .frame(height: 36)
+                                .padding(.horizontal, 12)
+                                .glassEffect(.regular.interactive(), in: .capsule)
+                                .padding(.top, 55)
+                                
+                                Spacer()
+                            }
+                            .zIndex(15)
+                        }
+                        
+                        if camera.isOnCall {
+                            ZStack {
+                                Color.black.ignoresSafeArea()
+                                VStack(spacing: 20) {
+                                    Image(systemName: "phone.down.circle.fill")
+                                        .font(.system(size: 60))
+                                        .foregroundColor(.red)
+                                    Text("통화 중에는 카메라 사용이 제한됩니다.")
+                                        .font(.headline)
+                                        .foregroundColor(.white)
+                                }
+                            }
+                            .zIndex(2000)
+                        }
+                        
+                        if onboardingStep < 4 {
+                            OnboardingOverlayView(step: $onboardingStep, camera: camera)
+                                .zIndex(1000)
+                        }
                     }
-                    .zIndex(15)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .alert("절전 모드 안내", isPresented: $camera.showBlackoutAlert) {
+                        Button("확인") { }
+                    } message: {
+                        Text("절전 모드를 켜더라도 시스템의 카메라, 마이크, 위치 등 권한 사용 표시는 유지됩니다. 이를 통해 촬영 중임을 인지할 수 있습니다.\n\n화면을 가볍게 탭하여 사진을, 길게 눌러 영상을 촬영할 수 있습니다. 위에서 아래로 스와이프하여 해제하세요.")
+                    }
+                    .statusBarHidden(camera.isBlackoutMode)
+                    .onChange(of: geometry.size) {
+                        camera.deviceOrientationDidChange()
+                    }
+                }
+                .sheet(item: $camera.shareURL) { shareItem in
+                    ShareSheet(items: [shareItem.url])
+                }
+                .sheet(isPresented: $camera.showSettings) {
+                    CameraSettingsView(camera: camera)
+                        .preferredColorScheme(.dark)
+                }
+                .fullScreenCover(isPresented: $camera.showPhotoPreviewSheet) {
+                    PhotoPreviewSheet(camera: camera)
+                }
+                .onAppear {
+                    camera.checkPermissionsAndStart()
+                }
+            }
+        }
+    }
+}
+
+enum PermissionState {
+    case notDetermined
+    case granted
+    case denied
+}
+
+class PermissionManager: ObservableObject {
+    @Published var cameraState: PermissionState = .notDetermined
+    @Published var micState: PermissionState = .notDetermined
+    @Published var photoState: PermissionState = .notDetermined
+    
+    var isAllEssentialGranted: Bool {
+        cameraState == .granted && micState == .granted && photoState == .granted
+    }
+    
+    var hasDeniedPermission: Bool {
+        cameraState == .denied || micState == .denied || photoState == .denied
+    }
+    
+    init() {
+        checkCurrentStatuses()
+    }
+    
+    func checkCurrentStatuses() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: cameraState = .granted
+        case .notDetermined: cameraState = .notDetermined
+        default: cameraState = .denied
+        }
+        
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: micState = .granted
+        case .notDetermined: micState = .notDetermined
+        default: micState = .denied
+        }
+        
+        switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+        case .authorized, .limited: photoState = .granted
+        case .notDetermined: photoState = .notDetermined
+        default: photoState = .denied
+        }
+    }
+    
+    func requestAllPermissions(completion: @escaping () -> Void) {
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] _ in
+            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { _ in
+                    DispatchQueue.main.async {
+                        self?.checkCurrentStatuses()
+                        completion()
+                    }
+                }
+            }
+        }
+    }
+    
+    func openSettings() {
+        guard let settingsUrl = URL(string: UIApplication.openSettingsURLString),
+              UIApplication.shared.canOpenURL(settingsUrl) else { return }
+        UIApplication.shared.open(settingsUrl)
+    }
+}
+
+struct PermissionGateView: View {
+    @ObservedObject var permissionManager: PermissionManager
+    var onPermissionsCompleted: () -> Void
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            VStack(spacing: 32) {
+                Spacer()
+                
+                VStack(spacing: 12) {
+                    Image(systemName: "camera.viewfinder")
+                        .font(.system(size: 64, weight: .light))
+                        .foregroundColor(.white)
+                    
+                    Text("앱 접근 권한 안내")
+                        .font(.title2.bold())
+                        .foregroundColor(.white)
+                    
+                    Text("안정적인 촬영과 영상 저장을 위해\n아래의 권한을 사용합니다.")
+                        .multilineTextAlignment(.center)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 
-                if camera.isOnCall {
-                    ZStack {
-                        Color.black.ignoresSafeArea()
-                        VStack(spacing: 20) {
-                            Image(systemName: "phone.down.circle.fill")
-                                .font(.system(size: 60))
-                                .foregroundColor(.red)
-                            Text("통화 중에는 카메라 사용이 제한됩니다.")
+                VStack(spacing: 14) {
+                    permissionRow(icon: "camera.fill", title: "카메라", desc: "고화질 사진 및 비디오 촬영을 위해 카메라 접근 권한이 필요합니다.", state: permissionManager.cameraState)
+                    permissionRow(icon: "mic.fill", title: "마이크", desc: "동영상 녹화 시 음성을 함께 녹음하기 위해 마이크 권한이 필요합니다.", state: permissionManager.micState)
+                    permissionRow(icon: "photo.on.rectangle.angled", title: "사진 보관함", desc: "촬영한 사진 및 동영상을 앨범에 저장하기 위해 접근 권한이 필요합니다.", state: permissionManager.photoState)
+                }
+                .padding(20)
+                .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                .padding(.horizontal, 20)
+                
+                Spacer()
+                
+                VStack(spacing: 12) {
+                    if permissionManager.hasDeniedPermission {
+                        Button(action: {
+                            permissionManager.openSettings()
+                        }) {
+                            HStack {
+                                Image(systemName: "gearshape.fill")
+                                Text("앱 설정으로 이동하기")
+                            }
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 54)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 16))
+                        
+                        Text("거부된 권한은 iOS 설정에서 변경 가능합니다.")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.5))
+                    } else {
+                        Button(action: {
+                            permissionManager.requestAllPermissions {
+                                if permissionManager.isAllEssentialGranted {
+                                    onPermissionsCompleted()
+                                }
+                            }
+                        }) {
+                            Text("다음으로")
                                 .font(.headline)
                                 .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 54)
+                                .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 16))
                     }
-                    .zIndex(2000)
                 }
-                
-                if onboardingStep < 4 {
-                    OnboardingOverlayView(step: $onboardingStep, camera: camera)
-                        .zIndex(1000)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 40)
+            }
+        }
+    }
+    
+    private func permissionRow(icon: String, title: String, desc: String, state: PermissionState) -> some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 22))
+                .foregroundColor(.white)
+                .frame(width: 32)
+            
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                Text(desc)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            
+            Spacer()
+            
+            Group {
+                switch state {
+                case .granted:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 22))
+                case .notDetermined:
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.3), lineWidth: 1.5)
+                        .frame(width: 22, height: 22)
+                case .denied:
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundColor(.red)
+                        .font(.system(size: 22))
                 }
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .alert("절전 모드 안내", isPresented: $camera.showBlackoutAlert) {
-                Button("확인", role: .cancel) { }
-            } message: {
-                Text("절전 모드를 켜더라도 시스템의 카메라, 마이크, 위치 등 권한 사용 표시는 유지됩니다. 이를 통해 촬영 중임을 인지할 수 있습니다.\n\n화면을 가볍게 탭하여 사진을, 길게 눌러 영상을 촬영할 수 있습니다. 위에서 아래로 스와이프하여 해제하세요.")
-            }
-            .statusBarHidden(camera.isBlackoutMode)
-            .onChange(of: geometry.size) {
-                camera.deviceOrientationDidChange()
-            }
         }
-        .sheet(item: $camera.shareURL) { shareItem in
-            ShareSheet(items: [shareItem.url])
-        }
-        .sheet(isPresented: $camera.showSettings) {
-            CameraSettingsView(camera: camera)
-                .preferredColorScheme(.dark)
-        }
-        .fullScreenCover(isPresented: $camera.showPhotoPreviewSheet) {
-            PhotoPreviewSheet(camera: camera)
-        }
+        .padding(.vertical, 6)
     }
 }
 
@@ -694,11 +895,6 @@ class CameraManager: NSObject, ObservableObject {
         callObserver.setDelegate(self, queue: .main)
         isOnCall = callObserver.calls.contains { !$0.hasEnded }
         
-        if UserDefaults.standard.integer(forKey: "onboardingStep") >= 4 {
-            checkPermissions()
-            setupLocationManager()
-        }
-        
         setupMotionManager()
         
         lastVolume = AVAudioSession.sharedInstance().outputVolume
@@ -744,6 +940,18 @@ class CameraManager: NSObject, ObservableObject {
         messageTimer?.invalidate()
         focusTimer?.invalidate()
         recordingTimer?.invalidate()
+    }
+    
+    func checkPermissionsAndStart() {
+        let photoStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
+              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+              (photoStatus == .authorized || photoStatus == .limited) else {
+            return
+        }
+        
+        setupCamera()
+        setupLocationManager()
     }
     
     @objc private func handleAudioInterruption(_ notification: Notification) {
@@ -928,41 +1136,6 @@ class CameraManager: NSObject, ObservableObject {
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingLocation()
-    }
-    
-    func checkPermissions() {
-        let videoStatus = AVCaptureDevice.authorizationStatus(for: .video)
-        let audioStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        
-        if videoStatus == .authorized && audioStatus == .authorized {
-            setupCamera()
-        } else {
-            AVCaptureDevice.requestAccess(for: .video) { videoGranted in
-                AVCaptureDevice.requestAccess(for: .audio) { audioGranted in
-                    if videoGranted {
-                        DispatchQueue.main.async { self.setupCamera() }
-                    }
-                }
-            }
-        }
-    }
-    
-    func requestPermissionsForOnboarding(completion: @escaping (Bool) -> Void) {
-        AVCaptureDevice.requestAccess(for: .video) { videoGranted in
-            AVCaptureDevice.requestAccess(for: .audio) { _ in
-                let handler: (PHAuthorizationStatus) -> Void = { status in
-                    DispatchQueue.main.async {
-                        if videoGranted {
-                            self.setupCamera()
-                            self.setupLocationManager()
-                        }
-                        completion(videoGranted && (status == .authorized || status == .limited))
-                    }
-                }
-                
-                PHPhotoLibrary.requestAuthorization(for: .readWrite, handler: handler)
-            }
-        }
     }
     
     private func applyOrientationConfiguration(uiOrientation: UIInterfaceOrientation, captureDeviceOrientation: UIDeviceOrientation) {
@@ -2440,43 +2613,12 @@ struct PhotoPreviewSheet: View {
 struct OnboardingOverlayView: View {
     @Binding var step: Int
     @ObservedObject var camera: CameraManager
-    @State private var showOnboardingSoundAlert = false
     
     var body: some View {
         ZStack {
             Color.black.opacity(0.4).ignoresSafeArea()
             VStack {
-                if step == 0 {
-                    Spacer()
-                    VStack(spacing: 24) {
-                        Text("환영합니다! 📸")
-                            .font(.title2.bold())
-                            .foregroundColor(.white)
-                        Text("앱 사용에 앞서 카메라, 마이크 및 사진 보관함 접근 권한이 필요합니다.\n모든 권한의 허용 여부는 선택적이며 추후 설정에서 변경할 수 있습니다.")
-                            .multilineTextAlignment(.center)
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button(action: {
-                            camera.requestPermissionsForOnboarding { _ in
-                                withAnimation(.easeInOut) { step = 1 }
-                            }
-                        }) {
-                            Text("다음")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .padding(.vertical, 14)
-                                .frame(maxWidth: .infinity)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
-                    }
-                    .padding(30)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 24))
-                    .padding(.horizontal, 24)
-                    Spacer()
-                } else if step == 1 {
+                if step <= 1 {
                     VStack(spacing: 24) {
                         Text("👆 상단 컨트롤")
                             .font(.title2.bold())
@@ -2487,38 +2629,35 @@ struct OnboardingOverlayView: View {
                             .foregroundColor(.white.opacity(0.8))
                             .fixedSize(horizontal: false, vertical: true)
                         
-                        Toggle("카메라 셔터 사운드", isOn: $camera.isShutterSoundOn)
-                            .tint(.accentColor)
-                            .foregroundColor(.white)
-                            .padding()
-                            .glassEffect(.regular, in: .rect(cornerRadius: 12))
-                        
-                        Button(action: {
-                            if camera.isShutterSoundOn {
-                                showOnboardingSoundAlert = true
-                            } else {
+                        HStack(spacing: 12) {
+                            Button(action: {
+                                camera.isShutterSoundOn = true
                                 withAnimation(.easeInOut) { step = 2 }
+                            }) {
+                                Text("소리 켜기")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                    .padding(.vertical, 14)
+                                    .frame(maxWidth: .infinity)
+                                    .contentShape(Rectangle())
                             }
-                        }) {
-                            Text("확인했어요")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .padding(.vertical, 14)
-                                .frame(maxWidth: .infinity)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
-                        .alert("무음 모드 안내", isPresented: $showOnboardingSoundAlert) {
-                            Button("계속 진행") {
-                                withAnimation(.easeInOut) { step = 2 }
-                            }
-                            Button("무음 활성화") {
+                            .buttonStyle(.plain)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+                            
+                            Button(action: {
                                 camera.isShutterSoundOn = false
                                 withAnimation(.easeInOut) { step = 2 }
+                            }) {
+                                Text("무음 활성화")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                    .padding(.vertical, 14)
+                                    .frame(maxWidth: .infinity)
+                                    .background(Color.blue.opacity(0.8), in: RoundedRectangle(cornerRadius: 12))
+                                    .contentShape(Rectangle())
                             }
-                        } message: {
-                            Text("카메라 셔터 사운드가 켜져 있습니다. 무음 모드를 활성화하시겠습니까?")
+                            .buttonStyle(.plain)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                         }
                     }
                     .padding(30)
