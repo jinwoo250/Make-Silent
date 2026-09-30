@@ -595,13 +595,70 @@ struct PermissionGateView: View {
                         .foregroundColor(.white.opacity(0.7))
                 }
                 
-                VStack(spacing: 14) {
-                    permissionRow(icon: "camera.fill", title: "카메라", desc: "고화질 사진 및 비디오 촬영을 위해 카메라 접근 권한이 필요합니다.", state: permissionManager.cameraState)
-                    permissionRow(icon: "mic.fill", title: "마이크", desc: "동영상 녹화 시 음성을 함께 녹음하기 위해 마이크 권한이 필요합니다.", state: permissionManager.micState)
-                    permissionRow(icon: "photo.on.rectangle.angled", title: "사진 보관함", desc: "촬영한 사진 및 동영상을 앨범에 저장하기 위해 접근 권한이 필요합니다.", state: permissionManager.photoState)
+                VStack(spacing: 16) {
+                    permissionRow(icon: "camera.fill", title: "카메라", state: permissionManager.cameraState)
+                    permissionRow(icon: "mic.fill", title: "마이크", state: permissionManager.micState)
+                    permissionRow(icon: "photo.on.rectangle.angled", title: "사진 보관함", state: permissionManager.photoState)
                 }
                 .padding(20)
                 .glassEffect(.regular, in: .rect(cornerRadius: 24))
+                .padding(.horizontal, 20)
+                
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.9))
+                        
+                        Text("프라이버시를 중심으로 설계했습니다")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                        
+                        Spacer()
+                        
+                        Link(destination: URL(string: "https://github.com/jinwoo250/Make-Silent")!) {
+                            HStack(spacing: 2) {
+                                Text("GitHub")
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                            .font(.footnote.bold())
+                            .foregroundColor(.blue.opacity(0.9))
+                        }
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.green.opacity(0.85))
+                            Text("모든 데이터는 서버 전송 없이 기기 내에만 저장")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.green.opacity(0.85))
+                            Text("광고 및 사용자 데이터 추적(트래커) 없음")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.green.opacity(0.85))
+                            Text("누구나 검토 가능한 오픈소스 코드 공개")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .glassEffect(.regular, in: .rect(cornerRadius: 16))
                 .padding(.horizontal, 20)
                 
                 Spacer()
@@ -619,6 +676,7 @@ struct PermissionGateView: View {
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .frame(height: 54)
+                            .background(Color.blue, in: RoundedRectangle(cornerRadius: 16))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -652,21 +710,16 @@ struct PermissionGateView: View {
         }
     }
     
-    private func permissionRow(icon: String, title: String, desc: String, state: PermissionState) -> some View {
+    private func permissionRow(icon: String, title: String, state: PermissionState) -> some View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 22))
                 .foregroundColor(.white)
                 .frame(width: 32)
             
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundColor(.white)
-                Text(desc)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.6))
-            }
+            Text(title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.white)
             
             Spacer()
             
@@ -2634,7 +2687,7 @@ struct OnboardingOverlayView: View {
                                 camera.isShutterSoundOn = true
                                 withAnimation(.easeInOut) { step = 2 }
                             }) {
-                                Text("소리 켜기")
+                                Text("셔터음 사용")
                                     .font(.headline)
                                     .foregroundColor(.white)
                                     .padding(.vertical, 14)
